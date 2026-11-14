@@ -43,6 +43,12 @@ func TestValidate(t *testing.T) {
 		{name: "tls ssl ok", mutate: func(c *Config) { c.Bridge[0].TLSMode = "ssl" }},
 		{name: "tls invalid", mutate: func(c *Config) { c.Bridge[0].TLSMode = "plain" }, wantErr: `tlsMode "plain"`},
 		{name: "tls empty invalid", mutate: func(c *Config) { c.Bridge[0].TLSMode = "" }, wantErr: "tlsMode"},
+		{name: "fingerprint empty (not pinned) ok", mutate: func(c *Config) { c.Bridge[0].CertFingerprint = "" }},
+		{name: "fingerprint lowercase ok", mutate: func(c *Config) { c.Bridge[0].CertFingerprint = strings.Repeat("ab", 32) }},
+		{name: "fingerprint uppercase ok", mutate: func(c *Config) { c.Bridge[0].CertFingerprint = strings.Repeat("AB", 32) }},
+		{name: "fingerprint too short", mutate: func(c *Config) { c.Bridge[0].CertFingerprint = strings.Repeat("ab", 31) }, wantErr: "certFingerprint must be 64 hex"},
+		{name: "fingerprint too long", mutate: func(c *Config) { c.Bridge[0].CertFingerprint = strings.Repeat("ab", 33) }, wantErr: "certFingerprint must be 64 hex"},
+		{name: "fingerprint not hex", mutate: func(c *Config) { c.Bridge[0].CertFingerprint = strings.Repeat("zz", 32) }, wantErr: "certFingerprint must be 64 hex"},
 		{name: "duplicate provider", mutate: func(c *Config) {
 			c.LLM.Providers = append(c.LLM.Providers, LLMProvider{Name: "ollama", BaseURL: "http://x", Model: "m"})
 		}, wantErr: `duplicate name "ollama"`},
@@ -136,6 +142,36 @@ func TestSecretsNeverInConfigJSON(t *testing.T) {
 		}
 	}
 	walk(all)
+}
+
+func TestCertFingerprintOmittedWhenEmpty(t *testing.T) {
+	c := validConfig()
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "certFingerprint") {
+		t.Errorf("empty certFingerprint must be omitted from JSON: %s", data)
+	}
+	c.Bridge[0].CertFingerprint = strings.Repeat("0f", 32)
+	data, err = json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"certFingerprint":"`+strings.Repeat("0f", 32)+`"`) {
+		t.Errorf("certFingerprint not encoded: %s", data)
+	}
+}
+
+func TestValidFingerprint(t *testing.T) {
+	if !ValidFingerprint(strings.Repeat("a1", 32)) {
+		t.Error("valid fingerprint rejected")
+	}
+	for _, bad := range []string{"", "abc", strings.Repeat("a", 63), strings.Repeat("g", 64), strings.Repeat("a1", 32) + " "} {
+		if ValidFingerprint(bad) {
+			t.Errorf("ValidFingerprint(%q) = true", bad)
+		}
+	}
 }
 
 func TestDefaultBridgeAccount(t *testing.T) {

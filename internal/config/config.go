@@ -47,6 +47,11 @@ type BridgeAccount struct {
 	SMTPPort int    `json:"smtpPort"`
 	TLSMode  string `json:"tlsMode"`
 	Username string `json:"username"`
+	// CertFingerprint is the pinned SHA-256 fingerprint (64 hex characters) of
+	// the Bridge leaf certificate. Empty means not yet pinned (TOFU): the first
+	// connection reports the fingerprint so the user can confirm it. Not a
+	// secret.
+	CertFingerprint string `json:"certFingerprint,omitempty"`
 }
 
 // LLMConfig lists the configured OpenAI-compatible providers.
@@ -134,6 +139,9 @@ func Validate(c Config) error {
 		if a.TLSMode != TLSModeSTARTTLS && a.TLSMode != TLSModeSSL {
 			add("%s: tlsMode %q must be %q or %q", where, a.TLSMode, TLSModeSTARTTLS, TLSModeSSL)
 		}
+		if a.CertFingerprint != "" && !ValidFingerprint(a.CertFingerprint) {
+			add("%s: certFingerprint must be 64 hex characters (SHA-256)", where)
+		}
 	}
 
 	names := make(map[string]bool, len(c.LLM.Providers))
@@ -157,6 +165,20 @@ func Validate(c Config) error {
 }
 
 func validPort(p int) bool { return p >= 1 && p <= 65535 }
+
+// ValidFingerprint reports whether s is a SHA-256 fingerprint written as 64
+// hexadecimal characters (either case).
+func ValidFingerprint(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
 
 func validBaseURL(raw string) error {
 	if raw == "" {
