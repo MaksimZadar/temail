@@ -1,0 +1,74 @@
+# Toolchain and tasks for temail. Run `mise run <task>` (or `mise tasks`).
+#
+# wails3 is installed by the `wails3` task (pinned, go install). It is not a
+# mise-managed tool because `go install` would compile the CLI with cgo, which
+# needs the GTK/WebKitGTK dev packages; the CLI is built with CGO_ENABLED=0.
+
+[tools]
+go = "1.26"
+node = "lts"
+pnpm = "10"
+
+[env]
+# `go install` puts wails3 in GOBIN (default ~/go/bin).
+_.path = ["~/go/bin"]
+
+[tasks.wails3]
+description = "Install the pinned Wails v3 CLI (CGO disabled so no GTK dev packages are needed)"
+env = { CGO_ENABLED = "0", WAILS_VERSION = "v3.1.0" }
+run = "go install github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
+
+[tasks.setup]
+description = "Install Go modules, frontend dependencies and the wails3 CLI"
+depends = ["wails3"]
+run = ["go mod download", "pnpm --dir frontend install"]
+
+[tasks.dev]
+description = "Run the app in Wails dev mode (hot reload)"
+run = "wails3 task dev"
+
+[tasks.build]
+description = "Build the app for the host OS"
+run = "wails3 task build"
+
+[tasks.bindings]
+description = "Generate Wails JS/TS bindings into frontend/bindings (cgo-free)"
+env = { CGO_ENABLED = "0" }
+run = "wails3 generate bindings -d frontend/bindings"
+
+[tasks.frontend-build]
+description = "Build the frontend into frontend/dist (embedded by main.go)"
+depends = ["bindings"]
+run = "pnpm --dir frontend build"
+
+# Go checks run with CGO_ENABLED=0 and the Wails experimental purego backend
+# (-tags purego, required by Wails' build guard when cgo is off). This avoids
+# needing GTK4/WebKitGTK 6.0 dev packages just to vet/test. The full Linux app
+# build still uses cgo (see `build`).
+[tasks.test]
+description = "Go tests and frontend unit tests"
+depends = ["frontend-build"]
+env = { CGO_ENABLED = "0", GOFLAGS = "-tags=purego" }
+run = ["go test ./...", "pnpm --dir frontend test"]
+
+[tasks.lint]
+description = "go vet and eslint"
+depends = ["frontend-build"]
+env = { CGO_ENABLED = "0", GOFLAGS = "-tags=purego" }
+run = ["go vet ./...", "pnpm --dir frontend lint"]
+
+[tasks.fmt]
+description = "Format Go and frontend sources"
+run = ["gofmt -w .", "pnpm --dir frontend format"]
+
+[tasks.typecheck]
+description = "svelte-check (TypeScript + Svelte diagnostics)"
+run = "pnpm --dir frontend check"
+
+[tasks.check]
+description = "lint + test + typecheck (CI gate)"
+depends = ["lint", "test", "typecheck"]
+
+[tasks.doctor]
+description = "Report build prerequisites and Proton Bridge reachability (never fails)"
+run = "bash scripts/doctor.sh"

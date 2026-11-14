@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MsixPackagingToolTemplate
+    xmlns="http://schemas.microsoft.com/msix/packaging/msixpackagingtool/template/2022">
+    <Settings
+        AllowTelemetry="false"
+        ApplyACLsToPackageFiles="true"
+        GenerateCommandLineFile="true"
+        AllowPromptForPassword="false">
+    </Settings>
+    <Installer
+        Path="temail"
+        Arguments=""
+        InstallLocation="C:\Program Files\Maksim Zadar\temail">
+    </Installer>
+    <PackageInformation
+        PackageName="temail"
+        PackageDisplayName="temail"
+        PublisherName="CN=Maksim Zadar"
+        PublisherDisplayName="Maksim Zadar"
+        Version="0.1.0.0"
+        PackageDescription="Proton Mail desktop client with LLM assistance">
+        <Capabilities>
+            <Capability Name="runFullTrust" />
+            
+        </Capabilities>
+        <Applications>
+            <Application
+                Id="com.maksimzadar.temail"
+                Description="Proton Mail desktop client with LLM assistance"
+                DisplayName="temail"
+                ExecutableName="temail"
+                EntryPoint="Windows.FullTrustApplication">
+                
+            </Application>
+        </Applications>
+        <Resources>
+            <Resource Language="en-us" />
+        </Resources>
+        <Dependencies>
+            <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+        </Dependencies>
+        <Properties>
+            <Framework>false</Framework>
+            <DisplayName>temail</DisplayName>
+            <PublisherDisplayName>Maksim Zadar</PublisherDisplayName>
+            <Description>Proton Mail desktop client with LLM assistance</Description>
+            <Logo>Assets\AppIcon.png</Logo>
+        </Properties>
+    </PackageInformation>
+    <SaveLocation PackagePath="temail.msix" />
+    <PackageIntegrity>
+        <CertificatePath></CertificatePath>
+    </PackageIntegrity>
+</MsixPackagingToolTemplate>
