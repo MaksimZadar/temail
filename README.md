@@ -90,16 +90,20 @@ on your machine, which decrypts and serves your mail over IMAP and SMTP.
 
 ## Secrets and settings
 
-- **Secrets** (Bridge password, LLM API keys) go in the OS keychain through
-  [go-keyring](https://github.com/zalando/go-keyring): Windows Credential Manager
-  on Windows, Secret Service on Linux.
-- **Fallback:** if no keychain is available, temail asks you to opt in to a file
-  store (DPAPI-encrypted on Windows, 0600 on Linux). It is never used
-  automatically, and the UI shows a warning while it is in use.
-- **Environment override:** `TEMAIL_LLM_<NAME>_KEY` takes precedence over the
-  stored key for that provider, e.g. `TEMAIL_LLM_OPENROUTER_KEY`.
-- **Settings** (non-secret) go in `~/.config/temail/config.json` on Linux and
-  `%APPDATA%\temail\config.json` on Windows.
+| Data | Where | Notes |
+|------|-------|-------|
+| Bridge password | OS keyring (service `temail`, user `bridge:<id>`) | Windows Credential Manager, Linux Secret Service, via [go-keyring](https://github.com/zalando/go-keyring) |
+| LLM API keys | OS keyring (user `llm:<provider>`) | Optional per provider |
+| Accounts, ports, TLS mode, provider URLs and models | `~/.config/temail/config.json` (Linux), `%APPDATA%\temail\config.json` (Windows) | Non-secret only; created with 0600 |
+
+- **Environment overrides** take precedence over the keyring:
+  - `TEMAIL_BRIDGE_PASSWORD`: Bridge password for a single account.
+  - `TEMAIL_LLM_<NAME>_KEY`: API key for one provider, e.g. `TEMAIL_LLM_OPENROUTER_KEY`.
+    `NAME` is the provider name uppercased, with non-alphanumeric characters
+    replaced by `_`.
+- **No file fallback.** Secrets are never written to a file. If the keyring is
+  unavailable, temail says so and does not store secrets anywhere else. On Linux,
+  start a Secret Service provider such as gnome-keyring or KeePassXC.
 
 ## Project layout
 
