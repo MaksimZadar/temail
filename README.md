@@ -104,7 +104,7 @@ on your machine, which decrypts and serves your mail over IMAP and SMTP.
 main.go              Wails entry point (placeholder window)
 internal/            Go packages: mail, llm, store, secrets, config, actions
 frontend/            Svelte 5 + Vite + TypeScript UI
-build/               Wails platform packaging (Windows, Linux, macOS, mobile)
+build/               Wails platform packaging (Windows, Linux)
 docs/                Architecture and design notes
 scripts/doctor.sh    Report-only environment check
 mise.toml            Toolchain and task definitions
