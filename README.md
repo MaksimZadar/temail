@@ -91,10 +91,11 @@ on your machine, which decrypts and serves your mail over IMAP and SMTP.
 - **Secrets** (Bridge password, LLM API keys) go in the OS keychain through
   [go-keyring](https://github.com/zalando/go-keyring): Windows Credential Manager
   on Windows, Secret Service on Linux.
-- **Fallback:** if no keychain is available, secrets are stored in a file with
-  0600 permissions and the UI shows a warning.
-- **Environment override:** `TEMAIL_OPENROUTER_KEY` takes precedence over the
-  stored OpenRouter key.
+- **Fallback:** if no keychain is available, temail asks you to opt in to a file
+  store (DPAPI-encrypted on Windows, 0600 on Linux). It is never used
+  automatically, and the UI shows a warning while it is in use.
+- **Environment override:** `TEMAIL_LLM_<NAME>_KEY` takes precedence over the
+  stored key for that provider, e.g. `TEMAIL_LLM_OPENROUTER_KEY`.
 - **Settings** (non-secret) go in `~/.config/temail/config.json` on Linux and
   `%APPDATA%\temail\config.json` on Windows.
 

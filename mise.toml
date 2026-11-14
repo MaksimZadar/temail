@@ -6,7 +6,7 @@
 
 [tools]
 go = "1.26"
-node = "lts"
+node = "26"
 pnpm = "10"
 
 [env]
@@ -59,7 +59,7 @@ run = ["go vet ./...", "pnpm --dir frontend lint"]
 
 [tasks.fmt]
 description = "Format Go and frontend sources"
-run = ["gofmt -w .", "pnpm --dir frontend format"]
+run = ["go fmt ./...", "pnpm --dir frontend format"]
 
 [tasks.typecheck]
 description = "svelte-check (TypeScript + Svelte diagnostics)"
