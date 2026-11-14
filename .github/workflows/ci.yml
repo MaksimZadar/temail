@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # GTK4 / WebKitGTK 6.0 dev packages needed by the cgo Linux app build
+      # (see README "Linux (CachyOS / Arch)" and `mise run doctor`).
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libgtk-4-dev \
+            libwebkitgtk-6.0-dev \
+            libsoup-3.0-dev
+
+      - name: Set up mise
+        uses: jdx/mise-action@v5
+        with:
+          cache: true
+
+      - name: Setup
+        run: mise run setup
+
+      - name: Check
+        run: mise run check
+
+      - name: Build
+        run: mise run build
