@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=temail
+Comment=Proton Mail desktop client with LLM assistance
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/temail %u
+Terminal=false
+Type=Application
+Icon=temail
+Categories=Utility;
+StartupWMClass=temail
+
+ 
