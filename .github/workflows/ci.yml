@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
 
+# One run per ref; a newer push or PR update cancels the older run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -21,8 +22,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # GTK4 / WebKitGTK 6.0 dev packages needed by the cgo Linux app build
-      # (see README "Linux (CachyOS / Arch)" and `mise run doctor`).
+      # GTK4 / WebKitGTK 6.0 dev packages for the cgo Linux app build
+      # (same set as README "Linux" and `mise run doctor`).
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -33,23 +34,16 @@ jobs:
             libwebkitgtk-6.0-dev \
             libsoup-3.0-dev
 
-      - name: Set up mise
+      - name: Set up mise (tools and cache)
         uses: jdx/mise-action@v5
         with:
           cache: true
 
-      - name: Setup
+      - name: Setup (modules, frontend deps, wails3 CLI)
         run: mise run setup
 
-      - name: Check
+      - name: Check (lint, test, typecheck)
         run: mise run check
 
-      # On a fresh checkout the Taskfile's generate:icons step runs `wails3 generate
-      # icons`, which writes build/darwin/icon.icns relative to the task's build/ dir
-      # and fails if that directory is missing (the repo has no darwin templates).
-      # Local runs skip it because .task/ caches the checksum.
-      - name: Prepare wails3 icon output dir
-        run: mkdir -p build/build/darwin
-
-      - name: Build
+      - name: Build (cgo Linux app)
         run: mise run build

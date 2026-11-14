@@ -25,7 +25,6 @@ dev_mode:
       - frontend
       - bin
     file:
-      - .DS_Store
       - .gitignore
       - .gitkeep
       - "*_test.go"
