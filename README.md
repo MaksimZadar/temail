@@ -71,6 +71,8 @@ with `CGO_ENABLED=0`, so it does not need the GTK dev packages. The `lint` and
 `test` tasks also run with `CGO_ENABLED=0 -tags purego`. The app build itself
 still needs cgo on Linux.
 
+CI (`.github/workflows/ci.yml`) runs `mise run check` and `mise run build` on Ubuntu 24.04 for every pull request and push to `main`.
+
 ## Proton Bridge
 
 temail does not talk to Proton's servers directly. It connects to Proton Bridge
