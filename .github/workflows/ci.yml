@@ -44,5 +44,12 @@ jobs:
       - name: Check
         run: mise run check
 
+      # On a fresh checkout the Taskfile's generate:icons step runs `wails3 generate
+      # icons`, which writes build/darwin/icon.icns relative to the task's build/ dir
+      # and fails if that directory is missing (the repo has no darwin templates).
+      # Local runs skip it because .task/ caches the checksum.
+      - name: Prepare wails3 icon output dir
+        run: mkdir -p build/build/darwin
+
       - name: Build
         run: mise run build
