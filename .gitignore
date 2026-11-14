@@ -13,7 +13,6 @@ coverage/
 *.out
 
 # Editors and OS files
-.DS_Store
 .idea/
 .vscode/
 *.log
