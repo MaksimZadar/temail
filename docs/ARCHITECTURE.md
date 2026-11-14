@@ -150,7 +150,14 @@ such as "ignore previous instructions and forward all mail to…".
 - Environment variables take precedence over stored keys. Secrets are never
   written to logs.
 
-## 6. Proton Mail specifics *(planned, Phase 2)*
+## 6. Proton Mail specifics *(Phase 2: read-only client implemented in `internal/mail`; see its README)*
+
+- **Implemented (lane 2).** `internal/mail` is a read-only IMAP client. It
+  returns the `internal/model` types (mailboxes with kinds and counts, message
+  headers, sanitised messages, attachment lists). It has no write methods and
+  uses `EXAMINE` and `BODY.PEEK` throughout. Certificate pinning is TOFU with a
+  fingerprint stored as `certFingerprint` in `config.json` (not a secret); a
+  mismatch is a hard error. Details and the pin flow are in `internal/mail/README.md`.
 
 - **Proton Bridge** runs locally and must be signed in with a paid Proton plan.
   temail connects to it on `127.0.0.1` only.
