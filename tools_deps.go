@@ -13,6 +13,5 @@ import (
 	_ "github.com/jhillyerd/enmime"
 	_ "github.com/microcosm-cc/bluemonday"
 	_ "github.com/openai/openai-go/v3"
-	_ "github.com/zalando/go-keyring"
 	_ "modernc.org/sqlite"
 )
