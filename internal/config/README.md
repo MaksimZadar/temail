@@ -5,7 +5,8 @@ Non-secret settings in `config.json`, under `os.UserConfigDir()/temail`
 Windows). Phase 2.
 
 - **Content:** schema `version`, `bridge` (accounts: `id`, `host`, `imapPort`,
-  `smtpPort`, `tlsMode` `starttls`|`ssl`, `username`) and `llm`
+  `smtpPort`, `tlsMode` `starttls`|`ssl`, `username`, optional
+  `certFingerprint`) and `llm`
   (`defaultProvider`, `providers[]`: `name`, `baseURL`, `model`).
 - **Defaults:** host `127.0.0.1`, IMAP port `1143`, SMTP port `1025`, TLS mode
   `starttls`. A missing file loads as an empty config; omitted Bridge fields take
@@ -17,6 +18,10 @@ Windows). Phase 2.
 - **Writes:** `Save` writes a temp file in the same directory and renames it over
   `config.json`. The directory is 0700 and the file is 0600. Unknown JSON fields
   are rejected on load.
+- **Certificate pin.** `certFingerprint` is the SHA-256 of the Bridge leaf
+  certificate as 64 hex characters (either case); it is omitted when unset. It is
+  written by the trust-on-first-use flow in `internal/mail` and is not a secret.
+  Empty means "not pinned yet".
 - **No secrets.** The file never holds passwords or API keys; see `internal/secrets`.
 
 ## What lives where
