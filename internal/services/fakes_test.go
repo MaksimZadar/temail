@@ -21,6 +21,8 @@ type fakeConfig struct {
 	loadE error
 	saves int
 	saveE error
+	// onSave, if set, runs at the start of Save, before the lock is taken.
+	onSave func()
 }
 
 func newFakeConfig(cfg config.Config) *fakeConfig { return &fakeConfig{cfg: cloneConfig(cfg)} }
@@ -35,6 +37,9 @@ func (f *fakeConfig) Load() (config.Config, error) {
 }
 
 func (f *fakeConfig) Save(c config.Config) error {
+	if f.onSave != nil {
+		f.onSave()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.saveE != nil {
