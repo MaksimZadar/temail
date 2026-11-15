@@ -62,6 +62,7 @@ description = "Format Go and frontend sources"
 run = ["go fmt ./...", "pnpm --dir frontend format"]
 
 [tasks.typecheck]
+depends = ["bindings"]
 description = "svelte-check (TypeScript + Svelte diagnostics)"
 run = "pnpm --dir frontend check"
 
