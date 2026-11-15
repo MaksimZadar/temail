@@ -99,6 +99,20 @@ func (s *KeyringStore) DeleteBridgePassword(accountID string) error {
 	return s.del(BridgeUser(accountID))
 }
 
+// StoredLLMKey returns the key that is stored in the keyring, ignoring the
+// environment. Rollback needs this: GetLLMKey would return an environment value
+// and write it into the keyring. ErrNotFound means the keyring has no entry.
+func (s *KeyringStore) StoredLLMKey(provider string) (string, error) {
+	v, err := keyring.Get(s.service, LLMUser(provider))
+	if errors.Is(err, keyring.ErrNotFound) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("read %s from keyring: %w", LLMUser(provider), err)
+	}
+	return v, nil
+}
+
 // GetLLMKey returns the API key for provider. The per-provider environment
 // variable takes precedence over the keyring. An empty result with ErrNotFound
 // means no key is configured.

@@ -218,3 +218,20 @@ func TestProbeDoesNotWrite(t *testing.T) {
 		t.Errorf("Probe wrote a secret: err = %v", err)
 	}
 }
+
+// StoredLLMKey must never fall back to the environment: a rollback that wrote an
+// environment value into the keyring would move a secret across sources.
+func TestStoredLLMKeyIgnoresEnvironment(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv(LLMEnvVar("envonly"), "env-only-value")
+	s := NewKeyringStore()
+	if _, err := s.StoredLLMKey("envonly"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound (the env value must not count)", err)
+	}
+	if err := s.SetLLMKey("envonly", "kept"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.StoredLLMKey("envonly"); err != nil || got != "kept" {
+		t.Fatalf("stored = %q, %v", got, err)
+	}
+}
