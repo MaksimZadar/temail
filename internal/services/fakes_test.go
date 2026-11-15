@@ -149,6 +149,14 @@ func (f *fakeSecrets) probes() int {
 	return f.probeCalls
 }
 
+// Status and Capabilities satisfy mail.Client. The services tests do not use
+// them, so they answer with empty values.
+func (c *fakeClient) Status(context.Context, string) (mail.MailboxStatus, error) {
+	return mail.MailboxStatus{}, nil
+}
+
+func (c *fakeClient) Capabilities() []string { return nil }
+
 // fakeClient is a scriptable mail.Client. Fields are read under mu.
 type fakeClient struct {
 	mu sync.Mutex
@@ -352,10 +360,13 @@ type fakeStore struct {
 	// stats is returned by CacheStats; statsAccount records the account asked for.
 	stats        store.CacheStats
 	statsAccount string
+	// members maps a placement to the mailboxes its message is in.
+	members map[store.MessageKey][]store.Placement
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{headers: map[store.MessageKey]model.MessageHeader{}, bodies: map[store.MessageKey]store.Body{}}
+	return &fakeStore{headers: map[store.MessageKey]model.MessageHeader{}, bodies: map[store.MessageKey]store.Body{},
+		members: map[store.MessageKey][]store.Placement{}}
 }
 
 func (f *fakeStore) GetSyncState(context.Context, string) ([]store.MailboxState, error) {
@@ -375,6 +386,18 @@ func (f *fakeStore) CacheStats(_ context.Context, account string) (store.CacheSt
 	defer f.mu.Unlock()
 	f.statsAccount = account
 	return f.stats, nil
+}
+
+// MembershipOf returns no placements: the services tests do not model
+// membership unless they set it.
+func (f *fakeStore) MembershipOf(_ context.Context, key store.MessageKey) ([]store.Placement, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pl, ok := f.members[key]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return pl, nil
 }
 
 func (f *fakeStore) ListMessages(_ context.Context, _, _ string, opts store.ListOptions) ([]model.MessageHeader, error) {

@@ -12,7 +12,8 @@ interface), `github.com/jhillyerd/enmime` for MIME, and
 - The `Client` interface has no write methods. A test checks the method names.
 - The implementation issues only: `LOGIN`, `LIST`, `STATUS`, `EXAMINE` (SELECT
   with `ReadOnly`), `UID SEARCH`, `UID FETCH` (headers, flags and bodies, the
-  bodies with `BODY.PEEK`), `LOGOUT`/close.
+  bodies with `BODY.PEEK`), `LOGOUT`/close. `Status` sends `STATUS` only.
+  `Capabilities` sends nothing.
   It never sends `STORE`, `COPY`, `MOVE`, `EXPUNGE`, `APPEND`, `CREATE`,
   `DELETE`, `RENAME`, `SUBSCRIBE` or `UNSUBSCRIBE`.
 - Three checks back this up in the test suite:
@@ -25,11 +26,34 @@ interface), `github.com/jhillyerd/enmime` for MIME, and
   3. Fetching a message does not set `\Seen`. The test checks the unseen count
      after a fetch.
 
+## Identity (`identity.go`)
+
+`FetchHeaders` reads `References`, `X-Pm-Internal-Id` and `Message-ID` in one
+`BODY.PEEK[HEADER.FIELDS (...)]` fetch, so the identity costs no extra request.
+`internalIDOf` returns the Proton id. The `X-Pm-Internal-Id` header is tried
+first. Otherwise the local part of a `<id@protonmail.internalid>` Message-ID is
+used, and the envelope value and the raw header both work. The id is canonical
+when it comes from one of those. Otherwise it is empty and not canonical, and the
+store gives the header a synthetic id.
+
+## Status and Capabilities
+
+- `Status(ctx, mailbox)` returns `MailboxStatus{Name, UIDValidity, UIDNext,
+  Messages, Unseen}` from `STATUS`. It does not select the mailbox, so it is
+  cheap for All Mail, where `SELECT` builds a large snapshot. It is meant for
+  polling.
+- `Capabilities()` returns the server's capability names from the last login,
+  upper-cased and sorted. Bridge reports `IMAP4REV1 ID IDLE MOVE UIDPLUS UNSELECT
+  STARTTLS AUTH=PLAIN`. Anything not listed (for example `CONDSTORE`, `QRESYNC`)
+  must not be assumed. It returns nil when not connected.
+
 ## Types (`internal/model`)
 
 - `Mailbox{Name, DisplayName, Kind, UIDValidity, Messages, Unseen}`.
-- `MessageHeader{Mailbox, UIDValidity, UID, MessageID, Subject, From, To, Date,
-  Flags, InReplyTo, References}`. `MessageID` and `InReplyTo` have no angle
+- `MessageHeader{Mailbox, UIDValidity, UID, InternalID, Canonical, Mailboxes,
+  MessageID, Subject, From, To, Date, Flags, InReplyTo, References}`.
+  `InternalID` is the Proton id (see Identity). `Mailboxes` is filled by the
+  services, not by this package. `MessageID` and `InReplyTo` have no angle
   brackets. `References` is the raw header.
 - `Message{MessageHeader, TextBody, HTMLBody, Attachments}`.
 - `Attachment{Filename, ContentType, Size, PartID}`. `PartID` is the IMAP

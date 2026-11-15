@@ -34,7 +34,9 @@ func TestClientInterfaceHasNoWriteMethods(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"Connect", "ListMailboxes", "MailboxInfo", "FetchHeaders", "ListUIDs", "FetchMessage", "FetchAttachment", "Close"}
+	// Status sends STATUS only. Capabilities sends nothing. Both were reviewed
+	// as read-only when they were added (see status_test.go).
+	want := []string{"Connect", "ListMailboxes", "MailboxInfo", "Status", "Capabilities", "FetchHeaders", "ListUIDs", "FetchMessage", "FetchAttachment", "Close"}
 	if typ.NumMethod() != len(want) {
 		t.Errorf("Client has %d methods, want exactly %d (%v): adding a method needs a read-only review", typ.NumMethod(), len(want), want)
 	}
@@ -106,6 +108,10 @@ func TestReadOnlyAcrossAllOperations(t *testing.T) {
 			if _, err := c.MailboxInfo(ctx, "INBOX"); err != nil {
 				t.Fatalf("MailboxInfo: %v", err)
 			}
+			if _, err := c.Status(ctx, "INBOX"); err != nil {
+				t.Fatalf("Status: %v", err)
+			}
+			_ = c.Capabilities()
 			if _, err := c.FetchHeaders(ctx, "INBOX", AllUIDs()); err != nil {
 				t.Fatalf("FetchHeaders: %v", err)
 			}

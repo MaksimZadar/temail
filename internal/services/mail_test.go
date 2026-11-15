@@ -334,3 +334,61 @@ func TestCacheInfoRefusedAfterShutdown(t *testing.T) {
 		t.Fatalf("err = %v, want ErrClosed", err)
 	}
 }
+
+// Membership: a message lists every mailbox it is in, folder and labels, and the
+// mailbox list carries the unseen count.
+func TestMessagesCarryMailboxMembership(t *testing.T) {
+	fx := newMailFixture(t)
+	h := header(4)
+	h.InternalID = "pm-m"
+	h.Canonical = true
+	fx.st.listed = []model.MessageHeader{h}
+	key := store.MessageKey{Account: "main", Mailbox: "INBOX", UIDValidity: testEpoch, UID: 4}
+	fx.st.members[key] = []store.Placement{
+		{Mailbox: "All Mail", Kind: model.KindFolder, DisplayName: "All Mail"},
+		{Mailbox: "INBOX", Kind: model.KindInbox, DisplayName: "INBOX"},
+		{Mailbox: "Labels/Work", Kind: model.KindLabel, DisplayName: "Work"},
+	}
+	page, err := fx.svc.ListMessages(context.Background(), "INBOX", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Messages) != 1 || len(page.Messages[0].Mailboxes) != 3 {
+		t.Fatalf("list membership = %+v", page.Messages)
+	}
+	if page.Messages[0].Mailboxes[2] != (model.MailboxRef{Name: "Labels/Work", DisplayName: "Work", Kind: model.KindLabel}) {
+		t.Fatalf("label ref = %+v", page.Messages[0].Mailboxes[2])
+	}
+	raw, _ := json.Marshal(page.Messages[0])
+	for _, field := range []string{`"mailboxes"`, `"internalId":"pm-m"`, `"canonical":true`, `"displayName":"Work"`} {
+		if !strings.Contains(string(raw), field) {
+			t.Fatalf("json missing %s in %s", field, raw)
+		}
+	}
+
+	fx.st.headers[key] = h
+	fx.st.bodies[key] = store.Body{Text: "cached"}
+	msg, err := fx.svc.GetMessage(context.Background(), "INBOX", testEpoch, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.Mailboxes) != 3 || msg.TextBody != "cached" {
+		t.Fatalf("GetMessage membership/body = %+v", msg)
+	}
+}
+
+func TestMailboxesCarryUnseen(t *testing.T) {
+	fx := newMailFixture(t)
+	fx.st.states = []store.MailboxState{{Name: "INBOX", DisplayName: "INBOX", Kind: model.KindInbox, Unseen: 7}}
+	got, err := fx.svc.ListMailboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Unseen != 7 {
+		t.Fatalf("mailboxes = %+v", got)
+	}
+	raw, _ := json.Marshal(got[0])
+	if !strings.Contains(string(raw), `"unseen":7`) {
+		t.Fatalf("json = %s", raw)
+	}
+}

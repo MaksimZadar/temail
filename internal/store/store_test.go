@@ -160,6 +160,8 @@ func TestHeadersRoundTripAndListNewestFirst(t *testing.T) {
 	want := hs[2]
 	want.Flags = []string{`\Flagged`, `\Seen`}
 	want.Date = want.Date.UTC()
+	// A header without an InternalID gets a synthetic, non-canonical id.
+	want.InternalID = syntheticMID("INBOX", 7, 3)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("GetMessage =\n%+v\nwant\n%+v", got, want)
 	}

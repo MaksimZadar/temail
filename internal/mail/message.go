@@ -22,9 +22,14 @@ import (
 	"github.com/MaksimZadar/temail/internal/model"
 )
 
+// idHeaderFields are the header fields fetched in the header-field section. They
+// are not part of the ENVELOPE: References, and the Proton identity headers
+// that make one message recognisable across mailboxes.
+var idHeaderFields = []string{"References", "X-Pm-Internal-Id", "Message-ID"}
+
 // headerFetchOptions asks for everything a list row needs. BODY.PEEK keeps
-// \Seen unchanged. The header-field section fetches only References, which is
-// not part of the ENVELOPE.
+// \Seen unchanged. The header-field section is one BODY.PEEK fetch, so the
+// identity headers cost no extra round trip.
 func headerFetchOptions() *imap.FetchOptions {
 	return &imap.FetchOptions{
 		UID:      true,
@@ -32,7 +37,7 @@ func headerFetchOptions() *imap.FetchOptions {
 		Envelope: true,
 		BodySection: []*imap.FetchItemBodySection{{
 			Specifier:    imap.PartSpecifierHeader,
-			HeaderFields: []string{"References"},
+			HeaderFields: idHeaderFields,
 			Peek:         true,
 		}},
 	}
@@ -96,9 +101,10 @@ func headerFromBuffer(mailbox string, uidValidity uint32, buf *imapclient.FetchM
 	}
 	if sec := buf.FindBodySection(&imap.FetchItemBodySection{
 		Specifier:    imap.PartSpecifierHeader,
-		HeaderFields: []string{"References"},
+		HeaderFields: idHeaderFields,
 	}); sec != nil {
 		h.References = headerField(sec, "References")
+		h.InternalID, h.Canonical = internalIDOf(sec, h.MessageID)
 	}
 	return h
 }

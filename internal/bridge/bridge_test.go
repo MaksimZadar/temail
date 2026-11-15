@@ -59,6 +59,10 @@ func (c *fakeClient) FetchMessage(context.Context, string, uint32) (model.Messag
 func (c *fakeClient) FetchAttachment(context.Context, string, uint32, string) ([]byte, error) {
 	return nil, nil
 }
+func (c *fakeClient) Status(context.Context, string) (mail.MailboxStatus, error) {
+	return mail.MailboxStatus{}, nil
+}
+func (c *fakeClient) Capabilities() []string { return nil }
 func (c *fakeClient) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

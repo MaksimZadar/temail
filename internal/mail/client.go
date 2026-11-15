@@ -39,6 +39,16 @@ type Client interface {
 	// ordered by UID. It fetches in batches of BatchSize.
 	FetchHeaders(ctx context.Context, mailbox string, rng UIDRange) ([]model.MessageHeader, error)
 
+	// Status returns the UIDVALIDITY, UIDNEXT, message count and unseen count of
+	// a mailbox with STATUS. It does not SELECT, so it is cheap even for All Mail
+	// and it does not change the selected mailbox. Use it for polling.
+	Status(ctx context.Context, mailbox string) (MailboxStatus, error)
+
+	// Capabilities returns the server's capability names from the last login,
+	// upper-cased and sorted (for example "IDLE" or "MOVE"). It returns nil when
+	// not connected. It never sends a command.
+	Capabilities() []string
+
 	// ListUIDs returns the UID and flags of every message in a mailbox, with
 	// the mailbox's UIDVALIDITY. It transfers no headers or bodies, so it is
 	// the cheap way to find server-side deletions and flag changes. It issues
@@ -89,6 +99,16 @@ type UIDListing struct {
 type UIDState struct {
 	UID   uint32
 	Flags []string
+}
+
+// MailboxStatus is the STATUS answer for one mailbox. Unseen is 0 when the
+// server did not report it.
+type MailboxStatus struct {
+	Name        string
+	UIDValidity uint32
+	UIDNext     uint32
+	Messages    uint32
+	Unseen      uint32
 }
 
 // MailboxInfo is the UID state of a selected mailbox.

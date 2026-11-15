@@ -42,18 +42,36 @@ type Address struct {
 	Email string `json:"email"`
 }
 
-// MessageHeader is the envelope-level view of one message. The pair
-// (Mailbox, UIDValidity, UID) identifies it; Message-ID is not unique enough
-// to key on.
+// MailboxRef names one mailbox a message is in: its folder or system mailbox,
+// or a label. It is part of a message's membership.
+type MailboxRef struct {
+	Name        string      `json:"name"`
+	DisplayName string      `json:"displayName"`
+	Kind        MailboxKind `json:"kind"`
+}
+
+// MessageHeader is the envelope-level view of one message as seen in one
+// mailbox. The triple (Mailbox, UIDValidity, UID) is the placement, and it
+// identifies the row in that mailbox. InternalID identifies the message across
+// mailboxes: the same message has a different UID in every mailbox it is in.
 type MessageHeader struct {
-	Mailbox     string    `json:"mailbox"`
-	UIDValidity uint32    `json:"uidValidity"`
-	UID         uint32    `json:"uid"`
-	MessageID   string    `json:"messageId"`
-	Subject     string    `json:"subject"`
-	From        []Address `json:"from"`
-	To          []Address `json:"to"`
-	Date        time.Time `json:"date"`
+	Mailbox     string `json:"mailbox"`
+	UIDValidity uint32 `json:"uidValidity"`
+	UID         uint32 `json:"uid"`
+	// InternalID is the Proton message id (X-Pm-Internal-Id, or the id in a
+	// Message-ID of the form <id@protonmail.internalid>). When neither exists it
+	// is a synthetic id for this placement, and Canonical is false.
+	InternalID string `json:"internalId"`
+	// Canonical reports whether InternalID is the real Proton id.
+	Canonical bool `json:"canonical"`
+	// Mailboxes lists every mailbox the message is in (folder and labels). The
+	// services fill it. The store does not.
+	Mailboxes []MailboxRef `json:"mailboxes"`
+	MessageID string       `json:"messageId"`
+	Subject   string       `json:"subject"`
+	From      []Address    `json:"from"`
+	To        []Address    `json:"to"`
+	Date      time.Time    `json:"date"`
 	// Flags holds IMAP flags such as "\Seen" and "\Flagged".
 	Flags      []string `json:"flags"`
 	InReplyTo  string   `json:"inReplyTo"`
