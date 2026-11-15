@@ -124,6 +124,9 @@
           >
         </p>
       {/if}
+      {#if llm.notice}
+        <p class="notice" role="status">{llm.notice}</p>
+      {/if}
       {#if llm.actionError}
         <p class="err" role="alert">{llm.actionError}</p>
       {/if}
@@ -192,17 +195,18 @@
   />
 {:else if confirm?.kind === "enable"}
   <ConfirmDialog
-    title="Turn on {confirm.p.name}?"
-    body="Cloud providers receive email content when you use AI features. Nothing is sent until you do, and you can turn it off again at any time."
-    confirmLabel="Turn on"
+    title="Review what's shared"
+    body="{confirm.p
+      .name} is a cloud provider. When you use AI features it receives email content. Nothing is sent until you turn it on, and you can turn it off again at any time. Your system will ask you to confirm."
+    confirmLabel="Continue"
     onconfirm={onConfirm}
     oncancel={() => (confirm = null)}
   />
 {:else if confirm?.kind === "form-enable"}
   <ConfirmDialog
-    title="Turn on {form.name.trim()}?"
-    body="Cloud providers receive email content when you use AI features. Nothing is sent until you do, and you can turn it off again at any time."
-    confirmLabel="Save and turn on"
+    title="Review what's shared"
+    body="{form.name.trim()} is a cloud provider. When you use AI features it receives email content. Nothing is sent until you turn it on, and you can turn it off again at any time. Your system will ask you to confirm."
+    confirmLabel="Save and continue"
     onconfirm={onConfirm}
     oncancel={() => (confirm = null)}
   />
@@ -246,6 +250,13 @@
   }
   .err {
     color: var(--danger);
+  }
+  .notice {
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    border-left: 3px solid var(--warn);
+    background: var(--bg);
+    border-radius: 4px;
   }
   .add {
     justify-self: start;

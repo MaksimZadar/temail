@@ -3,7 +3,6 @@
 import { Browser, Events } from "@wailsio/runtime";
 import {
   LLMService,
-  LLMProviderInput,
   MailService,
   SetupService,
   SyncService,
@@ -208,7 +207,7 @@ export const cacheInfo = (): Promise<CacheInfo> =>
 export const listProviders = (): Promise<LLMProvider[]> =>
   LLMService.ListProviders() as unknown as Promise<LLMProvider[]>;
 export const saveProvider = (input: LLMProviderIn): Promise<void> =>
-  LLMService.SaveProvider(new LLMProviderInput(input as never));
+  LLMService.SaveProvider(input as never);
 export const deleteProvider = (name: string): Promise<void> =>
   LLMService.DeleteProvider(name);
 /** An empty name clears the default. */

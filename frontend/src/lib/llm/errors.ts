@@ -62,7 +62,7 @@ const COPY: Record<string, TestCopy> = {
   },
   other: {
     title: "The test didn't work",
-    hint: "Something unexpected went wrong. Check the address, key and model.",
+    hint: "Check the address, key and model. The address redirected somewhere else? Use the final address.",
     action: "retry",
     actionLabel: "Test again",
   },
@@ -75,19 +75,67 @@ const text = (e: unknown): string =>
   e instanceof Error ? e.message : String(e ?? "");
 
 export const isKeyReentry = (e: unknown): boolean =>
-  /enter the API key again|base URL changed/i.test(text(e));
+  /enter the API key again|not approved for this base URL|base URL changed/i.test(
+    text(e),
+  );
+
+/** The OS confirmation for turning on a cloud provider was declined or not shown. */
+export const isEnableDeclined = (e: unknown): boolean =>
+  /was not confirmed; nothing was saved|not confirmed/i.test(text(e));
+
+export const DECLINED_NOTICE = "The provider stays off. Nothing was saved.";
+
+/** Shown when a saved key predates the address lock. */
+export const RELOCK_HINT =
+  "Please re-enter the key once so temail can lock it to this address.";
 
 /** The endpoint has no model list: the user types the model name instead. */
 export const isListUnsupported = (e: unknown): boolean =>
   /does not list models/i.test(text(e));
 
-export function saveErrorCopy(e: unknown): { title: string; body: string } {
-  if (isKeyReentry(e))
-    return {
-      title: "Enter the API key again",
-      body: "You changed the address, so re-enter the API key. It is never sent to a new address without you.",
-    };
+export interface SaveContext {
+  mode: "create" | "edit";
+  /** The address differs from the one saved. */
+  urlChanged: boolean;
+}
+
+export function saveErrorCopy(
+  e: unknown,
+  ctx: SaveContext = { mode: "edit", urlChanged: true },
+): { title: string; body: string } {
+  if (isKeyReentry(e)) {
+    if (ctx.mode === "create")
+      return {
+        title: "Enter the API key",
+        body: "A key is already stored under this name on this computer. Enter the API key to use with this address. It is never sent to an address you haven't approved.",
+      };
+    if (ctx.urlChanged)
+      return {
+        title: "Enter the API key again",
+        body: "You changed the address, so re-enter the API key. It is never sent to a new address without you.",
+      };
+    return { title: "Enter the API key again", body: RELOCK_HINT };
+  }
   const m = text(e);
+  if (/provider changed while it was being confirmed/i.test(m))
+    return {
+      title: "The provider changed",
+      body: "It changed while you were confirming. Nothing was saved. Try again.",
+    };
+  if (/collides with/i.test(m))
+    return {
+      title: "That name is too close to another",
+      body: "Names that differ only by capitals, - or _ would share one key setting. Pick a different name.",
+    };
+  if (
+    /userinfo|username|password in|must not contain a (query|fragment)|query|fragment/i.test(
+      m,
+    )
+  )
+    return {
+      title: "The address isn't plain",
+      body: "Remove any username, password, ? or # from the address. Enter the key in the API key field.",
+    };
   if (/keyring|keychain/i.test(m))
     return {
       title: "Can't store the API key",

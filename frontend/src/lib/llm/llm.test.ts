@@ -77,6 +77,29 @@ describe("validate", () => {
         .name,
     ).toBeUndefined();
   });
+  it("rejects names that would share an environment variable with another", () => {
+    const existing = ["open-ai", "Work_1"];
+    expect(validate({ ...base, name: "open_ai", existing }).name).toMatch(
+      /Too close to “open-ai”/,
+    );
+    expect(validate({ ...base, name: "OPEN-AI", existing }).name).toBeTruthy();
+    expect(validate({ ...base, name: "work-1", existing }).name).toBeTruthy();
+    expect(
+      validate({ ...base, name: "open-ai2", existing }).name,
+    ).toBeUndefined();
+  });
+  it("wants a plain address: no credentials, query or fragment", () => {
+    const u = (baseURL: string) => validate({ ...base, baseURL }).baseURL;
+    expect(u("https://user:pw@example.com/v1")).toMatch(
+      /username and password/,
+    );
+    expect(u("https://user@example.com/v1")).toMatch(/username and password/);
+    expect(u("https://example.com/v1?token=1")).toMatch(/query/);
+    expect(u("https://example.com/v1?")).toMatch(/query/);
+    expect(u("https://example.com/v1#x")).toMatch(/#/);
+    expect(u("https://example.com/v1")).toBeUndefined();
+    expect(u("http://127.0.0.1:11434/v1")).toBeUndefined();
+  });
   it("checks the address", () => {
     expect(validate({ ...base, baseURL: "" }).baseURL).toBeTruthy();
     expect(validate({ ...base, baseURL: "ftp://x" }).baseURL).toMatch(/http/);
@@ -180,6 +203,57 @@ describe("saving", () => {
     expect(await form.submit()).toBe("saved");
     expect(m.saveProvider).toHaveBeenCalledWith(
       expect.objectContaining({ apiKey: "", model: "x/z", name: "openrouter" }),
+    );
+  });
+
+  it("turns the switch off and shows a calm notice when the OS dialog is declined", async () => {
+    m.saveProvider.mockRejectedValue(
+      new Error(
+        "enabling a cloud LLM provider was not confirmed; nothing was saved",
+      ),
+    );
+    form.startCreate("openrouter");
+    form.apiKey = "sk-1";
+    form.enabled = true;
+    expect(await form.submit({ confirmed: true })).toBe("failed");
+    expect(form.notice).toBe("The provider stays off. Nothing was saved.");
+    expect(form.enabled).toBe(false);
+    expect(form.error).toBeNull();
+    expect(form.apiKey).toBe("");
+    expect(form.mode).toBe("create");
+  });
+
+  it("treats a local provider pointed at the cloud while on as turning one on", async () => {
+    form.startEdit(
+      provider({
+        name: "ollama",
+        baseURL: "http://127.0.0.1:11434/v1",
+        kind: "local",
+        enabled: true,
+      }),
+    );
+    form.baseURL = "https://api.example.com/v1";
+    form.apiKey = "k";
+    expect(await form.submit()).toBe("confirm");
+    expect(m.saveProvider).not.toHaveBeenCalled();
+  });
+
+  it("listing models never switches a cloud provider on while saving", async () => {
+    m.listModels.mockResolvedValue(["a"]);
+    form.startEdit(
+      provider({
+        name: "ollama",
+        baseURL: "http://127.0.0.1:11434/v1",
+        kind: "local",
+        enabled: true,
+        hasKey: false,
+      }),
+    );
+    form.baseURL = "https://api.example.com/v1";
+    form.apiKey = "k";
+    await form.loadModels();
+    expect(m.saveProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ enabled: false }),
     );
   });
 
@@ -320,6 +394,41 @@ describe("error copy", () => {
     expect(testCopy("unauthorized").action).toBe("edit");
     expect(testCopy("cloud_disabled").action).toBe("enable");
     expect(testCopy("unreachable").action).toBe("retry");
+  });
+  it("maps the new Go validation messages to friendly words", () => {
+    expect(
+      saveErrorCopy(
+        new Error(
+          'invalid input: invalid config: llm provider "a": name "a" collides with "A" (both read X)',
+        ),
+      ).title,
+    ).toMatch(/too close/i);
+    expect(
+      saveErrorCopy(
+        new Error("invalid input: baseURL: must not contain a query"),
+      ).title,
+    ).toMatch(/plain/i);
+    expect(
+      saveErrorCopy(
+        new Error(
+          "the provider changed while it was being confirmed; try again",
+        ),
+      ).title,
+    ).toMatch(/changed/i);
+  });
+  it("re-entry copy depends on where it happens", () => {
+    const e = new Error(
+      "an API key exists that was not approved for this base URL; enter the API key again",
+    );
+    expect(
+      saveErrorCopy(e, { mode: "create", urlChanged: false }).body,
+    ).toMatch(/already stored under this name/);
+    expect(saveErrorCopy(e, { mode: "edit", urlChanged: true }).body).toMatch(
+      /changed the address/,
+    );
+    expect(saveErrorCopy(e, { mode: "edit", urlChanged: false }).body).toMatch(
+      /re-enter the key once/,
+    );
   });
   it("save errors never echo unknown text", () => {
     const c = saveErrorCopy(new Error("secret sk-123 exploded"));

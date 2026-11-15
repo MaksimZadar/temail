@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { LLMProvider } from "../api";
-  import { testCopy } from "../llm/errors";
+  import { RELOCK_HINT, testCopy } from "../llm/errors";
   import type { TestState } from "../llm/store.svelte";
 
   let {
@@ -79,6 +79,9 @@
       <div class="out" class:ok={result.ok} class:bad={!result.ok}>
         <strong>{copy.title}</strong>
         <span>{copy.hint}</span>
+        {#if !result.ok && result.category === "other" && p.hasKey}
+          <span>{RELOCK_HINT}</span>
+        {/if}
         {#if !result.ok && copy.action}
           <button
             class="btn small"

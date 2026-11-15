@@ -1,5 +1,12 @@
 import * as api from "../api";
-import { isKeyReentry, isListUnsupported, saveErrorCopy } from "./errors";
+import {
+  DECLINED_NOTICE,
+  RELOCK_HINT,
+  isEnableDeclined,
+  isKeyReentry,
+  isListUnsupported,
+  saveErrorCopy,
+} from "./errors";
 import { kindFor, presetById, type PresetId } from "./presets";
 import { validate, type FieldErrors } from "./validate";
 
@@ -37,9 +44,12 @@ export class ProviderForm {
   keyNeeded = $state(false);
   /** The user must confirm turning on a cloud provider. */
   confirmEnable = $state(false);
+  /** A calm message (not an error), for example when the OS dialog was declined. */
+  notice = $state("");
 
   private originalURL = "";
   private originalEnabled = false;
+  private originalKind: "local" | "cloud" = "local";
 
   constructor(
     private readonly existing: () => string[],
@@ -69,6 +79,9 @@ export class ProviderForm {
 
   startCreate(preset: PresetId): void {
     this.mode = "create";
+    this.originalURL = "";
+    this.originalEnabled = false;
+    this.originalKind = "local";
     this.applyPreset(preset);
     this.model = "";
     this.apiKey = "";
@@ -91,6 +104,7 @@ export class ProviderForm {
     this.keyRequired = false;
     this.originalURL = p.baseURL;
     this.originalEnabled = p.enabled;
+    this.originalKind = p.kind;
     this.resetState();
   }
 
@@ -112,6 +126,7 @@ export class ProviderForm {
 
   private resetState(): void {
     this.error = null;
+    this.notice = "";
     this.showErrors = false;
     this.keyNeeded = false;
     this.confirmEnable = false;
@@ -142,12 +157,22 @@ export class ProviderForm {
     const typedKey = this.apiKey !== "";
     this.busy = true;
     this.error = null;
+    this.notice = "";
     this.keyNeeded = false;
     try {
       await api.saveProvider(this.input(enabled));
     } catch (e) {
-      this.error = saveErrorCopy(e);
-      this.keyNeeded = isKeyReentry(e);
+      if (isEnableDeclined(e)) {
+        // The OS dialog said no. Nothing was saved; keep the form, switch it off.
+        this.notice = DECLINED_NOTICE;
+        this.enabled = false;
+      } else {
+        this.error = saveErrorCopy(e, {
+          mode: this.mode,
+          urlChanged: this.urlChanged,
+        });
+        this.keyNeeded = isKeyReentry(e);
+      }
       return false;
     } finally {
       this.apiKey = "";
@@ -157,6 +182,7 @@ export class ProviderForm {
     this.mode = "edit";
     this.originalURL = this.baseURL.trim();
     this.originalEnabled = enabled;
+    this.originalKind = this.kind;
     return true;
   }
 
@@ -170,8 +196,10 @@ export class ProviderForm {
     if (this.busy) return "failed";
     this.showErrors = true;
     if (Object.keys(this.errors).length > 0) return "invalid";
-    const turningOn =
-      this.kind === "cloud" && this.enabled && !this.originalEnabled;
+    // Go also asks the OS for these: off to on, a new provider, or a local
+    // provider whose address now points to the cloud while it is on.
+    const wasCloudOn = this.originalEnabled && this.originalKind === "cloud";
+    const turningOn = this.kind === "cloud" && this.enabled && !wasCloudOn;
     if (turningOn && !opts.confirmed) {
       this.confirmEnable = true;
       return "confirm";
@@ -191,8 +219,12 @@ export class ProviderForm {
     const needsSave =
       this.mode === "create" || this.urlChanged || this.apiKey !== "";
     if (needsSave) {
+      // Saving to list models never switches a cloud provider on.
+      const wasCloudOn = this.originalEnabled && this.originalKind === "cloud";
       const enabled =
-        this.mode === "create" ? this.kind === "local" : this.originalEnabled;
+        this.kind === "local"
+          ? this.mode === "create" || this.originalEnabled
+          : wasCloudOn;
       if (!(await this.persist(enabled))) return;
       this.onSaved(this.name.trim(), false);
     }
@@ -205,7 +237,13 @@ export class ProviderForm {
     } catch (err) {
       this.models = [];
       this.manualModel = true;
-      this.modelsState = isListUnsupported(err) ? "unsupported" : "error";
+      if (isKeyReentry(err)) {
+        this.keyNeeded = true;
+        this.error = { title: "Enter the API key again", body: RELOCK_HINT };
+        this.modelsState = "error";
+      } else {
+        this.modelsState = isListUnsupported(err) ? "unsupported" : "error";
+      }
     }
   }
 
