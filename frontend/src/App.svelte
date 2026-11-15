@@ -4,7 +4,7 @@
   import { ui } from "./lib/stores/ui.svelte";
   import { Dispatcher } from "./lib/keys/dispatcher";
   import Wizard from "./lib/components/Wizard.svelte";
-  import MainPlaceholder from "./lib/components/MainPlaceholder.svelte";
+  import MainView from "./lib/components/MainView.svelte";
   import Footer from "./lib/components/Footer.svelte";
   import HelpOverlay from "./lib/components/HelpOverlay.svelte";
   import Palette from "./lib/components/Palette.svelte";
@@ -55,7 +55,7 @@
     {#if app.route === "setup"}
       <Wizard />
     {:else if app.route === "main"}
-      <MainPlaceholder />
+      <MainView />
     {:else}
       <p class="loading" role="status">Loading…</p>
     {/if}

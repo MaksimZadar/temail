@@ -44,12 +44,12 @@ export const keymap: Binding[] = [
   b("C-b", "list.pageUp", "main", 2, "Move", "Page up"),
   b("h", "pane.left", "main", 2, "Panes", "Focus pane left"),
   b("l", "pane.right", "main", 2, "Panes", "Focus pane right"),
-  b("Tab", "pane.next", "main", 2, "Panes", "Next pane"),
+  b("b", "folders.toggle", "main", 2, "Panes", "Show or hide folders"),
   b("o", "open", "main", 2, "Open", "Open"),
   b("Enter", "open", "main", 2, "Open", "Open"),
   b("]", "message.next", "main", 2, "Open", "Next message"),
   b("[", "message.prev", "main", 2, "Open", "Previous message"),
-  b("/", "search.filter", "main", 2, "Find", "Filter by subject"),
+  b("/", "search.filter", "main", 2, "Find", "Filter by subject or sender"),
 
   // Go to
   b("g i", "goto.inbox", "main", 2, "Go to", "Inbox"),
@@ -62,11 +62,12 @@ export const keymap: Binding[] = [
   b("g r", "sync.refresh", "main", 2, "Go to", "Refresh"),
 
   // Message view
-  b("i", "view.images", "main", 2, "Message", "Load images for this message"),
+  b("g x", "view.links", "main", 2, "Message", "Links in this message"),
   b("g h", "view.plain", "main", 2, "Message", "Plain text / HTML"),
   b("y", "copy.sender", "main", 2, "Message", "Copy sender address"),
 
   // Reserved: kept free so the map stays consistent. Nothing here acts yet.
+  b("i", "view.images", "main", 3, "Later", "Load remote images"),
   b("e", "msg.archive", "main", 4, "Later", "Archive"),
   b("#", "msg.trash", "main", 4, "Later", "Trash"),
   b("!", "msg.spam", "main", 4, "Later", "Mark as spam"),

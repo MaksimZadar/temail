@@ -10,6 +10,7 @@ class UI {
   count = $state<number | undefined>(undefined);
   whichKey = $state(false);
   hint = $state("");
+  paletteQuery = $state("");
   theme = $state<Theme>("auto");
   /** Set by the app: cancel a pending prefix, or run a which-key entry. */
   cancelKeys: () => void = () => {};

@@ -1,19 +1,28 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ui } from "../stores/ui.svelte";
+  import { mail } from "../stores/mail.svelte";
 
   interface Cmd {
     name: string;
     run: () => void;
   }
-  const commands: Cmd[] = [
+  const base: Cmd[] = [
     { name: "Show keyboard shortcuts", run: () => (ui.overlay = "help") },
     { name: "Theme: follow system", run: () => ui.setTheme("auto") },
     { name: "Theme: light", run: () => ui.setTheme("light") },
     { name: "Theme: dark", run: () => ui.setTheme("dark") },
   ];
 
-  let q = $state("");
+  const commands = $derived<Cmd[]>([
+    ...mail.folders.map((f) => ({
+      name: `Go to ${f.displayName}`,
+      run: () => void mail.selectFolder(f.name),
+    })),
+    ...base,
+  ]);
+
+  let q = $state(ui.paletteQuery);
   let sel = $state(0);
   let input: HTMLInputElement;
   let opener: Element | null = null;
@@ -25,6 +34,7 @@
 
   onMount(() => {
     opener = document.activeElement;
+    ui.paletteQuery = "";
     input.focus();
     return () => (opener as HTMLElement | null)?.focus?.();
   });
