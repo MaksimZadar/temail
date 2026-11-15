@@ -1,22 +1,53 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import * as api from "../api";
   import { ui } from "../stores/ui.svelte";
   import { mail } from "../stores/mail.svelte";
+  import { layout } from "../stores/layout.svelte";
+  import { trapFocus } from "../focus";
+  import { pieces, rank, type Cmd } from "../palette-rank";
 
-  interface Cmd {
-    name: string;
-    run: () => void;
-  }
+  /** At most this many results are on screen at once. */
+  const LIMIT = 5;
+
   const base: Cmd[] = [
-    { name: "Show keyboard shortcuts", run: () => (ui.overlay = "help") },
-    { name: "Theme: follow system", run: () => ui.setTheme("auto") },
-    { name: "Theme: light", run: () => ui.setTheme("light") },
-    { name: "Theme: dark", run: () => ui.setTheme("dark") },
+    {
+      name: "Refresh mail",
+      aliases: ["sync", "fetch", "reload"],
+      run: () =>
+        void api.syncStart().catch(() => ui.flash("Couldn't start a sync")),
+    },
+    {
+      name: "Show keyboard shortcuts",
+      aliases: ["help", "keys", "?"],
+      run: () => (ui.overlay = "help"),
+    },
+    {
+      name: "Show or hide folders",
+      aliases: ["sidebar", "panes"],
+      run: () => layout.toggleFolders(),
+    },
+    {
+      name: "Plain text or formatted",
+      aliases: ["html", "toggle"],
+      run: () => (mail.plain = !mail.plain),
+    },
+    {
+      name: "Theme: follow system",
+      aliases: ["auto"],
+      run: () => ui.setTheme("auto"),
+    },
+    {
+      name: "Theme: light",
+      aliases: ["day", "bright"],
+      run: () => ui.setTheme("light"),
+    },
+    { name: "Theme: dark", aliases: ["night"], run: () => ui.setTheme("dark") },
   ];
-
   const commands = $derived<Cmd[]>([
     ...mail.folders.map((f) => ({
       name: `Go to ${f.displayName}`,
+      aliases: [f.name, "folder", "open"],
       run: () => void mail.selectFolder(f.name),
     })),
     ...base,
@@ -24,13 +55,13 @@
 
   let q = $state(ui.paletteQuery);
   let sel = $state(0);
+  let top = $state(0);
   let input: HTMLInputElement;
+  let dialog: HTMLDivElement;
   let opener: Element | null = null;
-  const shown = $derived(
-    commands.filter((c) =>
-      c.name.toLowerCase().includes(q.trim().toLowerCase()),
-    ),
-  );
+
+  const results = $derived(rank(commands, q));
+  const visible = $derived(results.slice(top, top + LIMIT));
 
   onMount(() => {
     opener = document.activeElement;
@@ -39,61 +70,93 @@
     return () => (opener as HTMLElement | null)?.focus?.();
   });
 
-  function choose(c: Cmd | undefined): void {
-    if (!c) return;
+  function move(to: number): void {
+    if (results.length === 0) return;
+    sel = Math.min(results.length - 1, Math.max(0, to));
+    if (sel < top) top = sel;
+    else if (sel >= top + LIMIT) top = sel - LIMIT + 1;
+  }
+  function choose(i: number): void {
+    const r = results[i];
+    if (!r) return;
     ui.overlay = "none";
-    c.run();
+    r.cmd.run();
   }
   function onkey(e: KeyboardEvent): void {
+    if (e.key === "Escape") {
+      ui.overlay = "none";
+    } else if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) {
+      move(sel + 1);
+    } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
+      move(sel - 1);
+    } else if (e.key === "PageDown") {
+      move(sel + LIMIT);
+    } else if (e.key === "PageUp") {
+      move(sel - LIMIT);
+    } else if (e.key === "Enter") {
+      choose(sel);
+    } else return;
+    e.preventDefault();
     e.stopPropagation();
-    if (e.key === "Escape") ui.overlay = "none";
-    else if (e.key === "ArrowDown") {
-      sel = Math.min(sel + 1, shown.length - 1);
-      e.preventDefault();
-    } else if (e.key === "ArrowUp") {
-      sel = Math.max(sel - 1, 0);
-      e.preventDefault();
-    } else if (e.key === "Enter") choose(shown[sel]);
   }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <div class="scrim" role="presentation" onclick={() => (ui.overlay = "none")}>
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="card"
     role="dialog"
     aria-modal="true"
     aria-label="Commands"
     tabindex="-1"
+    bind:this={dialog}
+    use:trapFocus
     onclick={(e) => e.stopPropagation()}
   >
     <input
       bind:this={input}
       bind:value={q}
-      oninput={() => (sel = 0)}
+      oninput={() => {
+        sel = 0;
+        top = 0;
+      }}
       onkeydown={onkey}
       placeholder="Type a command"
       aria-label="Command"
       role="combobox"
       aria-expanded="true"
       aria-controls="cmd-list"
-      aria-activedescendant={shown[sel] ? `cmd-${sel}` : undefined}
+      aria-autocomplete="list"
+      aria-activedescendant={results[sel] ? `cmd-${sel}` : undefined}
+      autocomplete="off"
+      spellcheck="false"
     />
-    <ul id="cmd-list" role="listbox">
-      {#each shown as c, i (c.name)}
+    <ul id="cmd-list" role="listbox" aria-label="Matching commands">
+      {#each visible as r, k (r.cmd.name)}
+        {@const i = top + k}
         <li id="cmd-{i}" role="option" aria-selected={i === sel}>
           <button
             type="button"
             class:active={i === sel}
             tabindex="-1"
-            onclick={() => choose(c)}>{c.name}</button
+            onclick={() => choose(i)}
+            onmousemove={() => (sel = i)}
           >
+            {#each pieces(r.cmd.name, r.hits) as p, pi (pi)}
+              {#if p.hit}<mark>{p.text}</mark>{:else}{p.text}{/if}
+            {/each}
+          </button>
         </li>
       {:else}
-        <li class="empty">No matching command</li>
+        <li class="empty" role="status">No matching commands</li>
       {/each}
     </ul>
+    {#if results.length > LIMIT}
+      <p class="count" aria-hidden="true">
+        {top + 1}–{Math.min(results.length, top + LIMIT)} of {results.length}
+        · ↑↓ for more
+      </p>
+    {/if}
   </div>
 </div>
 
@@ -103,13 +166,14 @@
     inset: 0;
     display: flex;
     justify-content: center;
-    padding-top: 15vh;
+    padding-top: 12vh;
     background: var(--scrim);
     z-index: 10;
   }
   .card {
     width: min(30rem, 92vw);
     align-self: flex-start;
+    max-height: 70vh;
     background: var(--bg-raised);
     border: 1px solid var(--line);
     border-radius: 10px;
@@ -134,18 +198,33 @@
   }
   li button {
     width: 100%;
+    height: 2rem;
     text-align: left;
-    padding: 0.4rem 0.6rem;
+    padding: 0 0.6rem;
     background: none;
     border: 0;
     border-radius: 5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  li button:hover,
   li button.active {
     background: var(--sel-bg);
   }
-  .empty {
+  mark {
+    background: none;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .empty,
+  .count {
     padding: 0.5rem 0.6rem;
     color: var(--fg-dim);
+  }
+  .count {
+    margin: 0;
+    padding-top: 0.2rem;
+    border-top: 1px solid var(--line);
+    font-size: var(--fs-small);
   }
 </style>

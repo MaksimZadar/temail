@@ -27,17 +27,33 @@
     void mail.selectFolder(f.name);
   }
 
-  function move(delta: number, count: number | undefined): void {
-    const n = delta * (count ?? 1);
-    if (layout.focus === "folders") mail.moveFolder(n);
-    else if (layout.focus === "list") mail.moveCursor(n);
-    else if (!view?.scrollBody(n * 48))
-      ui.flash("Press Enter to scroll this message");
+  type Unit = "line" | "half" | "page";
+  /** Move by rows, half pages or pages. In the message pane this scrolls it. */
+  function move(
+    delta: 1 | -1,
+    count: number | undefined,
+    unit: Unit = "line",
+  ): void {
+    const c = count ?? 1;
+    if (layout.focus === "view") {
+      void view?.scrollView(unit, delta, c);
+      return;
+    }
+    const rows =
+      unit === "line"
+        ? 1
+        : unit === "half"
+          ? Math.floor(rowsPerPage() / 2)
+          : rowsPerPage();
+    if (layout.focus === "folders") mail.moveFolder(delta * rows * c);
+    else mail.moveCursor(delta * rows * c);
   }
   function jump(to: "first" | "last", count: number | undefined): void {
     if (layout.focus === "folders") {
       const i = to === "first" ? 0 : mail.folders.length - 1;
       mail.folderCursor = mail.folders[i]?.name ?? null;
+    } else if (layout.focus === "view") {
+      void view?.scrollView(to === "first" ? "top" : "bottom", 1);
     } else if (layout.focus === "list") {
       if (count !== undefined) mail.cursorTo(count - 1);
       else if (to === "first") mail.cursorTo(0);
@@ -91,14 +107,10 @@
       ui.register("list.up", (c) => move(-1, c)),
       ui.register("list.first", (c) => jump("first", c)),
       ui.register("list.last", (c) => jump("last", c)),
-      ui.register("list.halfDown", (c) =>
-        move(Math.floor(rowsPerPage() / 2), c),
-      ),
-      ui.register("list.halfUp", (c) =>
-        move(-Math.floor(rowsPerPage() / 2), c),
-      ),
-      ui.register("list.pageDown", (c) => move(rowsPerPage(), c)),
-      ui.register("list.pageUp", (c) => move(-rowsPerPage(), c)),
+      ui.register("list.halfDown", (c) => move(1, c, "half")),
+      ui.register("list.halfUp", (c) => move(-1, c, "half")),
+      ui.register("list.pageDown", (c) => move(1, c, "page")),
+      ui.register("list.pageUp", (c) => move(-1, c, "page")),
       ui.register("pane.left", left),
       ui.register("pane.right", right),
       ui.register("folders.toggle", () => layout.toggleFolders()),
