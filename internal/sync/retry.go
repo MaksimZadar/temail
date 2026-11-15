@@ -85,11 +85,13 @@ func (s *Syncer) backoff(n int) time.Duration {
 // connError.
 func (s *Syncer) reconnect(ctx context.Context) error {
 	if err := s.connect(ctx); err != nil {
+		s.connected = false
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
 		return &connError{err: err}
 	}
+	s.connected = true
 	return nil
 }
 

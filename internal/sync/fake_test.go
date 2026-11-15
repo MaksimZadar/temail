@@ -256,6 +256,20 @@ func (b *fakeBridge) MailboxInfo(ctx context.Context, mailbox string) (mail.Mail
 	return mail.MailboxInfo{}, errors.New("not used by sync")
 }
 
+// statusCount returns the number of STATUS calls, under the lock.
+func (b *fakeBridge) statusCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.statusCalls
+}
+
+// listCount returns the number of UID listings, under the lock.
+func (b *fakeBridge) listCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.listUIDsCalls
+}
+
 // Status implements mail.Client. The fake answers from its own state.
 func (b *fakeBridge) Status(ctx context.Context, mailbox string) (mail.MailboxStatus, error) {
 	if err := b.gate(ctx); err != nil {
