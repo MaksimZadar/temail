@@ -170,7 +170,7 @@ The bound methods are:
 | `MailService` | `GetAttachment(mailbox, uidValidity, uid, partID)` | Attachment bytes, fetched on demand. Limited to 10 MiB. Returned to the frontend, never written to disk |
 | `SyncService` | `Start()` | Starts a sync if none is running. Refuses until an account is configured, pinned and has a password |
 | `SyncService` | `Stop()` | Cancels the running sync and waits (15 s). On timeout it returns an error and `Status` shows `stopTimedOut` |
-| `SyncService` | `Status()` | Running flag, `stopTimedOut`, last result and last error |
+| `SyncService` | `Status()` | `running` (initial sync in progress), `watching` (the watcher runs after the sync), `idle` (the IDLE connection is watching), `lastChecked` (last reconcile check), `stopTimedOut`, last result and last error |
 | `LLMService` | `ListProviders()` | Providers as `LLMProviderDTO` `{name, baseURL, model, kind, enabled, capabilities, isDefault, hasKey}`. `hasKey` says whether a key exists. The key is never returned |
 | `LLMService` | `SaveProvider(input)` | Creates or updates a provider from `LLMProviderInput` (includes write-only `apiKey`). A non-empty `apiKey` replaces the stored key and binds it to the new base URL. An empty one keeps a key only if it is bound to that URL (`ErrKeyNeedsReentry` otherwise, for new providers too). Enabling cloud needs a native confirmation (`ErrEnableDeclined`). Order: keyring, then config, rolled back on failure. The name is the ID and does not change |
 | `LLMService` | `DeleteProvider(name)` | Removes the provider from config (clears the default if it was it) and deletes its keyring key. Config is restored if the keyring delete fails. Its environment variable is not touched |
@@ -185,6 +185,9 @@ Events emitted to the frontend (all from `SyncService`):
   ends here, with its mailbox errors listed.
 - `sync:error` with `{message}` when a run fails. A run that is stopped (by
   `Stop` or shutdown) emits no done or error event.
+- `sync:changed` with `{mailboxes: [names]}` after the watcher finds changes and
+  syncs them. A burst of changes is one event. After a full resync it lists all
+  mailboxes.
 
 Lifecycle: `SyncService` starts automatically at app start when the account is
 ready. The start runs in the background with a 10 s limit, so a locked keychain

@@ -11,6 +11,7 @@ import (
 
 	"github.com/MaksimZadar/temail/internal/bridge"
 	"github.com/MaksimZadar/temail/internal/config"
+	"github.com/MaksimZadar/temail/internal/mail"
 	"github.com/MaksimZadar/temail/internal/store"
 	mailsync "github.com/MaksimZadar/temail/internal/sync"
 )
@@ -42,13 +43,22 @@ type SyncService struct {
 	// means the package default.
 	stopWait      time.Duration
 	autostartWait time.Duration
+	// watchOff disables the watcher after the first sync (tests that end after
+	// one run). watchInterval and watchPoll override the reconcile periods, and
+	// newWatcher makes the IDLE connection (default mail.NewWatcher).
+	watchOff      bool
+	watchInterval time.Duration
+	watchPoll     time.Duration
+	newWatcher    func() mail.Watcher
 
 	mu           sync.Mutex
 	base         context.Context // parent of every run; set by ServiceStartup
 	gen          uint64          // bumped by Stop; stale launches drop out
 	cancel       context.CancelFunc
-	done         chan struct{} // non-nil while a run is active; closed when it has finished emitting
-	stopTimedOut bool          // Stop gave up waiting for the active run
+	done         chan struct{} // non-nil from start until the run and its watcher have ended
+	syncing      bool          // the initial sync is in progress
+	watcher      *mailsync.Watcher
+	stopTimedOut bool // Stop gave up waiting for the active run
 	lastResult   *SyncResult
 	lastError    string
 }
@@ -56,7 +66,8 @@ type SyncService struct {
 // NewSyncService returns a SyncService. It does not start a run; the app
 // starts one through ServiceStartup, or Start is called.
 func NewSyncService(st store.Store, cfg ConfigStore, sec PasswordSource, newClient ClientFactory, emitter Emitter) *SyncService {
-	return &SyncService{st: st, cfg: cfg, sec: sec, newClient: newClient, emitter: emitter}
+	return &SyncService{st: st, cfg: cfg, sec: sec, newClient: newClient, emitter: emitter,
+		newWatcher: func() mail.Watcher { return mail.NewWatcher() }}
 }
 
 var (
@@ -66,10 +77,23 @@ var (
 
 // SyncStatus is the state of the sync. It contains no secrets.
 type SyncStatus struct {
-	Running      bool        `json:"running"`
+	// Running is true while the initial sync is in progress.
+	Running bool `json:"running"`
+	// Watching is true once the initial sync has finished and the watcher runs.
+	Watching bool `json:"watching"`
+	// Idle is true while the IDLE connection is watching for changes.
+	Idle bool `json:"idle"`
+	// LastChecked is the time of the last completed reconcile check, or nil.
+	LastChecked  *time.Time  `json:"lastChecked"`
 	StopTimedOut bool        `json:"stopTimedOut"`
 	LastResult   *SyncResult `json:"lastResult"`
 	LastError    string      `json:"lastError"`
+}
+
+// ChangedEvent is the payload of sync:changed: the mailboxes that a check found
+// changed and that were then synced. Bursts are coalesced by the watcher.
+type ChangedEvent struct {
+	Mailboxes []string `json:"mailboxes"`
 }
 
 // SyncResult summarises one run, as in internal/sync.Result.
@@ -184,15 +208,27 @@ func (s *SyncService) Stop() error {
 
 // Status reports whether a run is active, whether a stop timed out, and the
 // outcome of the last run.
+// Status reports the run. Running is true while the initial sync is in progress.
+// Watching is true from the end of that sync until the run is stopped. Idle is
+// true while the IDLE connection is watching. LastChecked is the last completed
+// reconcile check.
 func (s *SyncService) Status() SyncStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return SyncStatus{
-		Running:      s.done != nil,
+	out := SyncStatus{
+		Running:      s.syncing,
+		Watching:     s.watcher != nil,
 		StopTimedOut: s.stopTimedOut,
 		LastResult:   s.lastResult,
 		LastError:    s.lastError,
 	}
+	if s.watcher != nil {
+		out.Idle = s.watcher.IdleActive()
+		if t := s.watcher.LastChecked(); !t.IsZero() {
+			out.LastChecked = &t
+		}
+	}
+	return out
 }
 
 // stillActive reports whether a run is still active (used by Shutdown).
@@ -250,6 +286,7 @@ func (s *SyncService) start() error {
 	done := make(chan struct{})
 	s.cancel = cancel
 	s.done = done
+	s.syncing = true
 	s.lastError = ""
 	go s.run(ctx, cancel, acct, pw, done)
 	return nil
@@ -261,9 +298,10 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 	defer cancel()
 
 	client := s.newClient()
-	syn, err := mailsync.New(s.st, client, func(ctx context.Context) error {
+	connect := func(ctx context.Context) error {
 		return client.Connect(ctx, acct, pw)
-	}, mailsync.Options{
+	}
+	syn, err := mailsync.New(s.st, client, connect, mailsync.Options{
 		Account:    acct.ID,
 		BodyDelay:  s.bodyDelay,
 		Backoff:    s.backoff,
@@ -279,29 +317,83 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 	}
 	stopped := ctx.Err() != nil
 	dto := toSyncResult(res)
+	partial := runErr != nil && errors.Is(runErr, mailsync.ErrPartial)
+	failed := runErr != nil && !partial
 
 	s.mu.Lock()
-	s.cancel = nil
-	s.done = nil
-	s.stopTimedOut = false
+	s.syncing = false
 	s.lastResult = &dto
 	switch {
 	case stopped:
 		s.lastError = "sync stopped"
-	case runErr != nil && !errors.Is(runErr, mailsync.ErrPartial):
+	case failed:
 		s.lastError = runErr.Error()
 	}
 	errText := s.lastError
+	// The run keeps its slot (cancel and done stay set) when the watcher runs
+	// next, so Stop and shutdown reach it through the same context.
+	watch := err == nil && !stopped && !failed && !s.watchOff
+	if !watch {
+		s.cancel = nil
+		s.done = nil
+		s.stopTimedOut = false
+	}
 	s.mu.Unlock()
 
 	switch {
 	case stopped:
 		// No outcome event: Stop and shutdown are not failures the user must see.
-	case runErr != nil && !errors.Is(runErr, mailsync.ErrPartial):
+	case failed:
 		s.emit(EventSyncError, SyncErrorEvent{Message: errText})
 	default:
 		s.emit(EventSyncDone, dto)
 	}
+	if !watch {
+		return
+	}
+
+	w := s.newMailWatcher(syn, acct, pw)
+	werr := w.Run(ctx)
+
+	s.mu.Lock()
+	s.watcher = nil
+	s.cancel = nil
+	s.done = nil
+	s.stopTimedOut = false
+	stopped = ctx.Err() != nil
+	if werr != nil && !stopped {
+		s.lastError = werr.Error()
+	}
+	s.mu.Unlock()
+	if werr != nil && !stopped {
+		s.emit(EventSyncError, SyncErrorEvent{Message: werr.Error()})
+	}
+}
+
+// newMailWatcher creates the watcher that runs after the initial sync. It uses
+// the sync's client for the reconcile checks, and its own IDLE connection.
+func (s *SyncService) newMailWatcher(syn *mailsync.Syncer, acct config.BridgeAccount, pw string) *mailsync.Watcher {
+	var idler mail.Watcher
+	if s.newWatcher != nil {
+		idler = s.newWatcher()
+	}
+	connectIdle := func(ctx context.Context) error {
+		if idler == nil {
+			return mail.ErrIdleUnsupported
+		}
+		return idler.Connect(ctx, acct, pw)
+	}
+	w := mailsync.NewWatcher(syn, idler, connectIdle, mailsync.WatchOptions{
+		Interval:     s.watchInterval,
+		PollInterval: s.watchPoll,
+		OnChanged: func(names []string) {
+			s.emit(EventSyncChanged, ChangedEvent{Mailboxes: names})
+		},
+	})
+	s.mu.Lock()
+	s.watcher = w
+	s.mu.Unlock()
+	return w
 }
 
 func (s *SyncService) progress(p mailsync.Progress) {

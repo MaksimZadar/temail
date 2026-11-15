@@ -53,6 +53,7 @@ const (
 	EventSyncProgress = "sync:progress"
 	EventSyncDone     = "sync:done"
 	EventSyncError    = "sync:error"
+	EventSyncChanged  = "sync:changed"
 )
 
 // Connection test categories returned by SetupService.TestConnection.

@@ -53,6 +53,7 @@ func newSyncFixture(t *testing.T, cfg config.Config) *syncFixture {
 	cfgStore := newFakeConfig(cfg)
 	ev := &fakeEmitter{}
 	svc := NewSyncService(st, cfgStore, sec, f.new, ev)
+	svc.watchOff = true // these tests end after the first sync; watch tests turn it on
 	svc.bodyDelay = time.Millisecond
 	svc.backoff = time.Millisecond
 	svc.stopWait = 5 * time.Second

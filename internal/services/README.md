@@ -95,6 +95,20 @@ running, and its result is cached for 30 s.
 
 ### MailService
 
+- **Watching (phase P4 PR B).** After the first sync, `SyncService` starts the
+  change watcher on the same run (see `internal/sync/README.md`). The run keeps
+  its slot, so `Stop` and shutdown stop the watcher through the same context.
+  - `SyncStatus` now has `running` (only during the first sync), `watching` (the
+    watcher is up), `idle` (the IDLE connection is up) and `lastChecked`.
+    `running` used to mean "a run exists"; a UI that showed a spinner for
+    `running` now sees the spinner stop once the first sync is done. `watching`
+    shows the live state.
+  - `sync:changed` `{mailboxes: [...]}` is emitted after a check found changes
+    and they were synced. Bursts are coalesced.
+  - A permanent watch error (auth failure) emits `sync:error` and stops the
+    watch. A stop emits nothing.
+  - Tests inject the IDLE connection through `newWatcher`, so they need no
+    server.
 - `CacheInfo(ctx)` returns `CacheInfoDTO{bytes, messages, bodies}` (camelCase
   JSON). It reads through `store.CacheStats`: `bytes` is `os.Stat` of the
   database, `-wal` and `-shm` (a missing file counts 0), and the counts are
