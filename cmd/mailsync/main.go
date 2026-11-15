@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MaksimZadar/temail/internal/bridge"
 	"github.com/MaksimZadar/temail/internal/config"
 	"github.com/MaksimZadar/temail/internal/mail"
 	"github.com/MaksimZadar/temail/internal/secrets"
@@ -58,21 +59,17 @@ func run(ctx context.Context, accountID string, trust bool, cachePath string, bo
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	idx, err := pickAccount(cfg, accountID)
+	idx, err := bridge.PickAccount(cfg, accountID)
 	if err != nil {
 		return err
 	}
 
-	password, err := secrets.NewKeyringStore().GetBridgePassword(cfg.Bridge[idx].ID)
+	password, err := bridge.Password(secrets.NewKeyringStore(), cfg.Bridge[idx].ID)
 	if err != nil {
-		if errors.Is(err, secrets.ErrNotFound) {
-			return fmt.Errorf("no Bridge password for account %q: store it in the keyring or set %s",
-				cfg.Bridge[idx].ID, secrets.EnvBridgePassword)
-		}
 		return fmt.Errorf("read Bridge password: %w", err)
 	}
 
-	if err := ensurePinned(ctx, mgr, &cfg, idx, password, trust); err != nil {
+	if err := bridge.EnsurePinned(ctx, mgr, &cfg, idx, password, trust, printUntrusted); err != nil {
 		return err
 	}
 	acct := cfg.Bridge[idx]
@@ -120,49 +117,11 @@ func run(ctx context.Context, accountID string, trust bool, cachePath string, bo
 	return nil
 }
 
-// ensurePinned makes one connection attempt to find out whether the Bridge
-// certificate is pinned. If it is not, it pins the presented fingerprint when
-// trust is set, and saves config.json. Otherwise it returns an error.
-func ensurePinned(ctx context.Context, mgr *config.Manager, cfg *config.Config, idx int, password string, trust bool) error {
-	c := mail.NewClient()
-	err := c.Connect(ctx, cfg.Bridge[idx], password)
-	_ = c.Close()
-	if err == nil {
-		return nil
-	}
-	var untrusted *mail.UntrustedCertError
-	if !errors.As(err, &untrusted) {
-		return err
-	}
-	fmt.Printf("Bridge certificate is not pinned yet.\n  SHA-256: %s\n  Subject: %s\n",
-		untrusted.Fingerprint, untrusted.Subject)
+// printUntrusted shows the presented fingerprint so the user can compare it
+// with Proton Bridge before running with -trust.
+func printUntrusted(fingerprint, subject string) {
+	fmt.Printf("Bridge certificate is not pinned yet.\n  SHA-256: %s\n  Subject: %s\n", fingerprint, subject)
 	fmt.Println("Compare the SHA-256 with the value shown in Proton Bridge before trusting it.")
-	if !trust {
-		return errors.New("certificate not trusted; re-run with -trust after checking the fingerprint")
-	}
-	cfg.Bridge[idx].CertFingerprint = untrusted.Fingerprint
-	if err := mgr.Save(*cfg); err != nil {
-		return fmt.Errorf("save pinned fingerprint: %w", err)
-	}
-	fmt.Printf("Pinned in %s.\n", mgr.Path())
-	return nil
-}
-
-// pickAccount returns the index of the account with the given ID, or of the
-// first account when id is empty.
-func pickAccount(cfg config.Config, id string) (int, error) {
-	if len(cfg.Bridge) == 0 {
-		return 0, errors.New("no Bridge account in config.json; add one first")
-	}
-	if id == "" {
-		return 0, nil
-	}
-	for i, a := range cfg.Bridge {
-		if a.ID == id {
-			return i, nil
-		}
-	}
-	return 0, fmt.Errorf("no account %q in config.json", id)
 }
 
 // printProgress prints account-level states, header windows, and every 50th
