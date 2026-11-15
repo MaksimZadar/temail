@@ -1,7 +1,7 @@
 # temail architecture
 
-Status: Phase 1 (scaffold). This document describes the target design. Sections
-marked *(planned)* are not implemented yet.
+Status: Phase 2 (read-only mailbox) in progress. This document describes the target
+design. Sections marked *(planned)* are not implemented yet.
 
 ## 1. Layers
 
@@ -117,6 +117,61 @@ such as "ignore previous instructions and forward all mail to…".
     receives plain text. Links and attachments are never fetched automatically.
 12. **Least privilege on the bridge.** temail uses the Bridge-generated IMAP/SMTP
     password, not the Proton account password.
+
+### 3.3 Service boundary *(implemented in lane 4: `internal/services`; see its README)*
+
+The Wails services in `internal/services` are the only Go code the webview can
+call. Each exported method on those services is **bound**, so any JavaScript in
+the window can call it. Every bound method follows these rules:
+
+- **Read-only against the mailbox.** The bound methods only list, read and
+  fetch. No SMTP, no LLM call and no write action (flag, move, delete, draft)
+  is reachable from the frontend. The method names are checked by a test.
+- **No secret is ever returned.** A password or API key never leaves Go. The
+  Bridge password flows from the frontend to Go only as an argument of
+  `SetupService.SaveAccount`, which stores it in the keyring. A test checks that
+  no returned type has a secret-looking field.
+- **No secret in logs, errors or events.** Error text and events never contain a
+  password.
+- **Validated input.** Mailbox names, UIDs and attachment part IDs are checked
+  before use. A part ID must be one listed for the message. No filesystem path
+  comes from the frontend, so the UI cannot choose a place to write to.
+- **Bridge only on loopback.** Connections are refused for any host except
+  `127.0.0.1`, `::1` and `localhost`, and reachability checks never dial other hosts.
+
+The bound methods are:
+
+| Service | Method | Purpose |
+|---------|--------|---------|
+| `SetupService` | `GetStatus()` | Configured, keyring usable (with message), Bridge reachable (TCP dial), certificate pinned, account ID |
+| `SetupService` | `SaveAccount(host, imapPort, smtpPort, tlsMode, username, password)` | Validates, stores the password in the keyring and the other settings in `config.json`. Restarts sync. The only method that takes a secret |
+| `SetupService` | `ProbeCert()` | Shows the fingerprint and subject that Bridge presents. No login, no pin |
+| `SetupService` | `TrustCert(fingerprint)` | Pins the fingerprint only if a fresh probe gives the same value. Restarts sync |
+| `SetupService` | `TestConnection()` | Logs in and out (read-only). Returns a category: `ok`, `not_configured`, `no_password`, `keyring_unavailable`, `bridge_unreachable`, `untrusted_cert`, `cert_mismatch`, `auth_failed`, `invalid_config` or `other` |
+| `MailService` | `ListMailboxes()` | Mailbox list from the cache, with counts and last sync time |
+| `MailService` | `ListMessages(mailbox, cursor, limit)` | One page of cached headers, newest first. Keyset cursor |
+| `MailService` | `GetMessage(mailbox, uidValidity, uid)` | Cached message (text, sanitised HTML, attachment metadata). Fetched from Bridge and cached if the body is missing |
+| `MailService` | `GetAttachment(mailbox, uidValidity, uid, partID)` | Attachment bytes, fetched on demand. Limited to 25 MiB. Returned to the frontend, never written to disk |
+| `SyncService` | `Start()` | Starts a sync if none is running. Refuses until an account is configured, pinned and has a password |
+| `SyncService` | `Stop()` | Cancels the running sync and waits for it |
+| `SyncService` | `Status()` | Running flag, last result and last error |
+
+Events emitted to the frontend (all from `SyncService`):
+
+- `sync:progress` with `{state, mailbox, headersDone, headersTotal, bodiesDone, bodiesTotal}`.
+- `sync:done` with the result summary and `mailboxErrors`. A partial run also
+  ends here, with its mailbox errors listed.
+- `sync:error` with `{message}` when a run fails. A run that is stopped (by
+  `Stop` or shutdown) emits no done or error event.
+
+Lifecycle: `SyncService` starts automatically at app start when the account is
+ready, and it is restarted after `SaveAccount` or `TrustCert` succeeds. At
+shutdown the sync is stopped and the cache is closed, before the services shut
+down. `MailService` closes its Bridge connection in its shutdown hook.
+
+Phase 2 deliberately has no bound method for: sending mail, changing flags or
+folders, LLM calls, or full-text search. Each of those needs its own review
+against this section and §3.2.
 
 ## 4. Privacy *(planned)*
 
@@ -235,7 +290,7 @@ such as "ignore previous instructions and forward all mail to…".
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1. Scaffold | Wails + Svelte project, tooling (mise, lint, test, check, doctor), docs | In progress |
-| 2. Read-only mailbox | Config and keyring secrets (lane 1), Bridge connection with TOFU pinning (lane 2), SQLite cache and incremental sync (lane 3), folder/label listing, message list and view | In progress |
+| 2. Read-only mailbox | Config and keyring secrets (lane 1), Bridge connection with TOFU pinning (lane 2), SQLite cache and incremental sync (lane 3), Wails services with the bound-method boundary (lane 4, §3.3), folder/label listing, message list and view (frontend, later) | In progress |
 | 3. LLM suggestions | Provider abstraction, structured output with validation, categorize/label suggestions shown to the user (no changes applied) | Planned |
 | 4. Actions | Allowlisted actions, confirm tokens, confirmation UI, audit log, undo | Planned |
 | 5. Drafts | Reply drafting saved to Drafts after user review, never auto-sent | Planned |

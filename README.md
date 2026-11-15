@@ -108,8 +108,9 @@ on your machine, which decrypts and serves your mail over IMAP and SMTP.
 ## Project layout
 
 ```
-main.go              Wails entry point (placeholder window)
-internal/            Go packages: mail, llm, store, secrets, config, actions
+main.go              Wails entry point (wires the services into one window)
+internal/            Go packages: services (Wails bindings), bridge, mail, store, sync,
+                     secrets, config, model; llm and actions come later
 frontend/            Svelte 5 + Vite + TypeScript UI
 build/               Wails platform packaging (Windows, Linux)
 docs/                Architecture and design notes
