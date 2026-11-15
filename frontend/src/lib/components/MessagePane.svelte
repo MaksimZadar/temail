@@ -25,6 +25,15 @@
     !m ? "" : hasText ? m.textBody : hasHtml ? htmlToText(m.htmlBody) : "",
   );
   const links = $derived(prepared?.links ?? []);
+  // Where the message lives: its folder or system mailbox, then its labels.
+  const places = $derived(m?.mailboxes ?? []);
+  const folderRefs = $derived(places.filter((r) => r.kind !== "label"));
+  const labelRefs = $derived(places.filter((r) => r.kind === "label"));
+
+  function jump(name: string): void {
+    if (layout.narrow) layout.setFocus("list");
+    void mail.goto(name);
+  }
 
   let frame = $state<HTMLIFrameElement>();
   let bodyEl = $state<HTMLDivElement>();
@@ -215,7 +224,36 @@
         <dd>{addressText(m.to) || "(none)"}</dd>
         <dt>Date</dt>
         <dd>{formatFullDate(m.date)}</dd>
+        {#if places.length > 0}
+          <dt>In</dt>
+          <dd class="chips">
+            {#each folderRefs as r (r.name)}
+              <button
+                type="button"
+                class="chip folder"
+                title="Go to {r.displayName}"
+                onclick={() => jump(r.name)}>{r.displayName}</button
+              >
+            {/each}
+            {#each labelRefs as r (r.name)}
+              <button
+                type="button"
+                class="chip label"
+                title="Show messages labelled {r.displayName}"
+                aria-label="Label {r.displayName}"
+                onclick={() => jump(r.name)}
+              >
+                <span class="dot" aria-hidden="true"></span>{r.displayName}
+              </button>
+            {/each}
+          </dd>
+        {/if}
       </dl>
+      {#if mail.openGone}
+        <p class="gone" role="status">
+          This message is no longer in this folder. It was moved or deleted.
+        </p>
+      {/if}
       <div class="bar">
         {#if hasHtml && hasText}
           <div class="seg" role="group" aria-label="Message format">
@@ -401,6 +439,45 @@
   dd {
     margin: 0;
     overflow-wrap: anywhere;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    max-width: 14rem;
+    padding: 0 0.55rem;
+    height: 1.3rem;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--bg-raised);
+    font-size: var(--fs-small);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chip:hover {
+    border-color: var(--accent);
+  }
+  .chip.label {
+    background: var(--accent-soft);
+    border-color: transparent;
+  }
+  .chip .dot {
+    flex: none;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .gone {
+    margin: 0.3rem 0 0;
+    font-size: var(--fs-small);
+    color: var(--warn);
   }
   .addr {
     color: var(--fg-dim);

@@ -61,19 +61,48 @@ export function matchesFilter(h: MessageHeader, q: string): boolean {
   return hay.includes(needle);
 }
 
-/** Merge a fresh first page into the loaded list. Same array if nothing changed. */
+const refNames = (h: MessageHeader): string =>
+  (h.mailboxes ?? []).map((r) => r.name).join("\u0000");
+
+/**
+ * Merge a fresh first page into the loaded list. Same array if nothing changed.
+ * Loaded messages that fall inside the fresh page's range but are missing from
+ * it were removed on the server and are dropped. When `complete` is true the
+ * fresh page is the whole folder, so everything not in it is dropped.
+ */
 export function mergeHead(
   existing: MessageHeader[],
   fresh: MessageHeader[],
+  complete = false,
 ): MessageHeader[] {
-  const byKey = new Map(existing.map((h) => [keyOf(h), h]));
+  const freshKeys = new Set(fresh.map(keyOf));
+  const oldest = fresh[fresh.length - 1];
   let changed = false;
+  let kept = existing;
+  if (complete) {
+    kept = existing.filter((h) => freshKeys.has(keyOf(h)));
+    changed = kept.length !== existing.length;
+  } else if (oldest) {
+    // The list is newest first, so only the front part can be compared.
+    const limit = Date.parse(oldest.date);
+    const head: MessageHeader[] = [];
+    let i = 0;
+    for (; i < existing.length; i++) {
+      const h = existing[i];
+      if (Date.parse(h.date) <= limit) break;
+      if (freshKeys.has(keyOf(h))) head.push(h);
+      else changed = true;
+    }
+    if (changed) kept = head.concat(existing.slice(i));
+  }
+  const byKey = new Map(kept.map((h) => [keyOf(h), h]));
   for (const f of fresh) {
     const old = byKey.get(keyOf(f));
     if (
       !old ||
       old.flags?.join() !== f.flags?.join() ||
-      old.subject !== f.subject
+      old.subject !== f.subject ||
+      refNames(old) !== refNames(f)
     ) {
       byKey.set(keyOf(f), f);
       changed = true;

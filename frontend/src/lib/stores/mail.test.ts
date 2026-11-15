@@ -23,6 +23,7 @@ const box = (name: string, kind: MailboxDTO["kind"]): MailboxDTO => ({
   uidValidity: 7,
   messages: 3,
   bodies: 0,
+  unseen: 0,
   lastSync: null,
 });
 const page = (uids: number[], next = false) => ({
@@ -69,7 +70,7 @@ describe("Mail store", () => {
     await mail.loadFolders();
     mail.cursorTo(2); // uid 3
     const before = keyOf(mail.shown[mail.cursorIndex]);
-    m.listMessages.mockResolvedValueOnce(page([8, 7, 6, 5, 4]));
+    m.listMessages.mockResolvedValueOnce(page([8, 7, 6, 5, 4], true));
     await mail.refreshHead();
     expect(mail.messages.map((x) => x.uid)).toEqual([8, 7, 6, 5, 4, 3, 2, 1]);
     expect(keyOf(mail.shown[mail.cursorIndex])).toBe(before);
@@ -85,7 +86,7 @@ describe("Mail store", () => {
       attachments: null,
     });
     await mail.open(mail.messages[2]);
-    m.listMessages.mockResolvedValueOnce(page([9, 8, 7, 6, 5]));
+    m.listMessages.mockResolvedValueOnce(page([9, 8, 7, 6, 5], true));
     await mail.refreshHead();
     expect(mail.message?.uid).toBe(3);
     expect(mail.openKey).toBe(keyOf(hdr(3)));

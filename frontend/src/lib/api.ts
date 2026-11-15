@@ -34,7 +34,13 @@ export interface SyncResult {
   mailboxErrors: { mailbox: string; message: string }[] | null;
 }
 export interface SyncStatus {
+  /** True only during the initial sync. Use `watching` for the live state. */
   running: boolean;
+  /** The change watcher is up (after the initial sync). */
+  watching: boolean;
+  /** The IDLE connection is up; false means the watcher is polling. */
+  idle: boolean;
+  lastChecked: string | null;
   stopTimedOut: boolean;
   lastResult: SyncResult | null;
   lastError: string;
@@ -55,6 +61,8 @@ export type MailboxKind =
   | "label";
 export interface MailboxDTO extends MailboxInfo {
   kind: MailboxKind;
+  /** Unseen messages, from the last sync. */
+  unseen: number;
   uidValidity: number;
   bodies: number;
   lastSync: string | null;
@@ -63,7 +71,16 @@ export interface Address {
   name: string;
   email: string;
 }
+/** A mailbox a message is in: its folder or system mailbox, or a label. */
+export interface MailboxRef {
+  name: string;
+  displayName: string;
+  kind: MailboxKind;
+}
 export interface MessageHeader {
+  internalId?: string;
+  canonical?: boolean;
+  mailboxes?: MailboxRef[] | null;
   mailbox: string;
   uidValidity: number;
   uid: number;

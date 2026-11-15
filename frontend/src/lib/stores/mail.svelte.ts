@@ -28,6 +28,9 @@ export class Mail {
   messageError = $state("");
   plain = $state(false);
 
+  /** The open message is no longer in the folder (moved or deleted). */
+  openGone = $state(false);
+  private headQueued = false;
   private req = 0;
   private msgReq = 0;
 
@@ -68,6 +71,7 @@ export class Mail {
     this.cursorKey = null;
     this.openKey = null;
     this.message = null;
+    this.openGone = false;
     this.messageError = "";
     this.filter = "";
     await this.loadPage(true);
@@ -99,12 +103,15 @@ export class Mail {
       if (id === this.req) this.error = errText(e);
     } finally {
       if (id === this.req) this.loading = false;
+      if (this.headQueued) {
+        this.headQueued = false;
+        void this.refreshHead();
+      }
     }
   }
 
-  /** Pick up new mail at the top without moving the cursor or the open message. */
-  async refreshHead(): Promise<void> {
-    const name = this.current;
+  /** Reload the folder list (names, unseen and total counts). */
+  async refreshFolders(): Promise<void> {
     try {
       const boxes = await api.listMailboxes();
       this.folders = orderFolders(boxes);
@@ -113,11 +120,23 @@ export class Mail {
     } catch {
       /* keep what we have */
     }
+  }
+
+  /**
+   * Pick up new mail at the top and drop messages that disappeared, without
+   * moving the cursor, the open message or the scroll position.
+   */
+  async refreshHead(): Promise<void> {
+    const name = this.current;
+    await this.refreshFolders();
     if (!name) {
       if (this.folders.length > 0) await this.loadFolders();
       return;
     }
-    if (this.loading) return;
+    if (this.loading) {
+      this.headQueued = true; // run again when the page in flight is done
+      return;
+    }
     try {
       const page = await api.listMessages(name, null, PAGE);
       if (name !== this.current) return;
@@ -127,12 +146,91 @@ export class Mail {
         this.next = page.next;
         if (this.cursorKey === null && fresh.length > 0)
           this.cursorKey = keyOf(fresh[0]);
-      } else {
-        this.messages = mergeHead(this.messages, fresh);
+        return;
       }
+      const at = this.cursorIndex;
+      const merged = mergeHead(this.messages, fresh, page.next === null);
+      if (merged === this.messages) return;
+      this.messages = merged;
+      if (page.next === null) this.next = null;
+      // The cursor stays on its message. If that message is gone, move to the
+      // one that took its place.
+      if (this.cursorKey !== null && this.cursorIndex < 0) {
+        const list = this.shown;
+        const near = list[Math.min(Math.max(at, 0), list.length - 1)];
+        this.cursorKey = near ? keyOf(near) : null;
+      }
+      if (this.openKey && !merged.some((h) => keyOf(h) === this.openKey))
+        this.openGone = true;
     } catch {
       /* a failed background refresh is not worth an error banner */
     }
+  }
+
+  // ---- live changes ----
+
+  private changed: Record<string, true> = {};
+  private changedAll = false;
+  private changedTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * A `sync:changed` event. Bursts are coalesced: one refresh of the counts,
+   * and of the open list only if it is one of the changed mailboxes.
+   */
+  noteChanged(mailboxes: string[] | null | undefined, delay = 250): void {
+    if (!mailboxes || mailboxes.length === 0) this.changedAll = true;
+    else for (const m of mailboxes) this.changed[m] = true;
+    if (this.changedTimer !== undefined) return;
+    this.changedTimer = setTimeout(() => {
+      this.changedTimer = undefined;
+      const all = this.changedAll;
+      const set = this.changed;
+      this.changed = {};
+      this.changedAll = false;
+      void this.applyChanged(all, set);
+    }, delay);
+  }
+
+  private async applyChanged(
+    all: boolean,
+    set: Record<string, true>,
+  ): Promise<void> {
+    const cur = this.current;
+    if (cur && (all || cur in set)) await this.refreshHead();
+    else await this.refreshFolders();
+    // Labels on the open message may have changed.
+    const msg = this.message;
+    if (
+      msg &&
+      (all ||
+        (msg.mailboxes ?? []).some((r) => r.name in set) ||
+        msg.mailbox in set)
+    )
+      await this.refreshOpen();
+  }
+
+  /** Re-read the open message (cached in Go) so its folder and labels stay current. */
+  async refreshOpen(): Promise<void> {
+    const msg = this.message;
+    if (!msg) return;
+    try {
+      const m = await api.getMessage(msg.mailbox, msg.uidValidity, msg.uid);
+      if (this.message && keyOf(this.message) === keyOf(m)) this.message = m;
+    } catch {
+      /* the message may be gone; the list refresh reports that */
+    }
+  }
+
+  stopLive(): void {
+    clearTimeout(this.changedTimer);
+    this.changedTimer = undefined;
+    this.changed = {};
+    this.changedAll = false;
+  }
+
+  /** Jump to a folder or label by name, like the `g` jumps. */
+  async goto(name: string): Promise<void> {
+    await this.selectFolder(name);
   }
 
   // ---- cursor ----
@@ -188,6 +286,7 @@ export class Mail {
     this.cursorKey = key;
     if (key === this.openKey && this.message) return;
     this.openKey = key;
+    this.openGone = false;
     this.message = null;
     this.messageError = "";
     this.messageLoading = true;

@@ -242,6 +242,7 @@ describe("keyboard in the mailbox view", () => {
         uidValidity: 7,
         messages: 5,
         bodies: 0,
+        unseen: 0,
         lastSync: null,
       },
     ]);
@@ -308,6 +309,7 @@ describe("focused pane highlight", () => {
         uidValidity: 7,
         messages: 1,
         bodies: 0,
+        unseen: 0,
         lastSync: null,
       },
     ]);

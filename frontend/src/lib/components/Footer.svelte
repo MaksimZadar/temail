@@ -13,7 +13,7 @@
       <button
         class="status"
         type="button"
-        title="Show sync details"
+        title={sync.detail}
         aria-haspopup="dialog"
         aria-expanded={ui.overlay === "sync"}
         onclick={() => (ui.overlay = ui.overlay === "sync" ? "none" : "sync")}
@@ -25,6 +25,9 @@
           aria-hidden="true"
         ></span>
         <span>{sync.text}</span>
+        {#if sync.polling}
+          <span class="poll" title={sync.detail}>polling</span>
+        {/if}
         {#if sync.fraction !== null}
           <span class="bar" aria-hidden="true"
             ><span style:width="{sync.fraction * 100}%"></span></span
@@ -120,6 +123,13 @@
     50% {
       opacity: 0.35;
     }
+  }
+  .poll {
+    padding: 0 0.35rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 0.6875rem;
+    color: var(--fg-dim);
   }
   .bar {
     width: 6rem;
