@@ -12,7 +12,7 @@ export default ts.config(
   ...ts.configs.recommended,
   ...svelte.configs.recommended,
   {
-    files: ["**/*.svelte"],
+    files: ["**/*.svelte", "**/*.svelte.ts"],
     languageOptions: {
       parserOptions: {
         parser: ts.parser,

@@ -1,0 +1,57 @@
+/* Colour tokens. Light is the default; dark follows the system, and
+   <html data-theme="dark|light"> overrides both (set by :theme). */
+:root {
+  color-scheme: light;
+  --bg: #fafaf8;
+  --bg-pane: #f2f1ed;
+  --bg-raised: #ffffff;
+  --fg: #1d1f23;
+  --fg-dim: #5c616a;
+  --line: #dcdad3;
+  --accent: #6d41d8;
+  --accent-fg: #ffffff;
+  --accent-soft: #6d41d824;
+  --sel-bg: #6d41d824;
+  --danger: #b42f26;
+  --ok: #1d7a46;
+  --warn: #8a5a00;
+  --scrim: #1d1f2399;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #14161a;
+    --bg-pane: #191c21;
+    --bg-raised: #1f2329;
+    --fg: #d8dbe0;
+    --fg-dim: #8d95a0;
+    --line: #2a2e36;
+    --accent: #a78bfa;
+    --accent-fg: #14161a;
+    --accent-soft: #a78bfa29;
+    --sel-bg: #a78bfa29;
+    --danger: #f0847b;
+    --ok: #6fcf97;
+    --warn: #e0b04a;
+    --scrim: #000000a6;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14161a;
+  --bg-pane: #191c21;
+  --bg-raised: #1f2329;
+  --fg: #d8dbe0;
+  --fg-dim: #8d95a0;
+  --line: #2a2e36;
+  --accent: #a78bfa;
+  --accent-fg: #14161a;
+  --accent-soft: #a78bfa29;
+  --sel-bg: #a78bfa29;
+  --danger: #f0847b;
+  --ok: #6fcf97;
+  --warn: #e0b04a;
+  --scrim: #000000a6;
+}
