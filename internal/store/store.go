@@ -19,6 +19,10 @@ import (
 	"github.com/MaksimZadar/temail/internal/model"
 )
 
+// ErrEmptyListing is returned by DeleteMailboxesNotIn when given no names. An
+// empty server listing is treated as a failed listing, not as "no mailboxes".
+var ErrEmptyListing = errors.New("refusing to remove mailboxes for an empty server listing")
+
 // ErrNotFound is returned when a requested message or body is not cached.
 var ErrNotFound = errors.New("not found in cache")
 
@@ -74,6 +78,20 @@ type Body struct {
 	Attachments []model.Attachment
 }
 
+// PendingBody is one message that still needs a body.
+type PendingBody struct {
+	Key  MessageKey
+	Date time.Time
+}
+
+// PendingCursor marks a position in PendingBodies. The order is
+// (Date, Mailbox, UIDValidity, UID) descending, so the cursor is the last
+// message of the previous page.
+type PendingCursor struct {
+	Date time.Time
+	Key  MessageKey
+}
+
 // FlagUpdate sets the flags of one cached message.
 type FlagUpdate struct {
 	UID   uint32
@@ -97,6 +115,7 @@ type Store interface {
 	UpsertMailboxes(ctx context.Context, account string, boxes []model.Mailbox) error
 	// DeleteMailboxesNotIn removes the account's mailboxes whose names are not
 	// in names, with their messages and bodies. Pass the full server listing.
+	// An empty names list returns ErrEmptyListing and removes nothing.
 	DeleteMailboxesNotIn(ctx context.Context, account string, names []string) error
 	// GetSyncState returns the cached state of every mailbox of the account.
 	GetSyncState(ctx context.Context, account string) ([]MailboxState, error)
@@ -108,12 +127,15 @@ type Store interface {
 
 	// CachedUIDs returns the cached UIDs of one mailbox epoch, ascending.
 	CachedUIDs(ctx context.Context, account, mailbox string, uidValidity uint32) ([]uint32, error)
+	// CachedFlags returns the cached flags of one mailbox epoch, by UID.
+	CachedFlags(ctx context.Context, account, mailbox string, uidValidity uint32) (map[uint32][]string, error)
 	// UpsertHeaders stores headers in one transaction. An existing row is
 	// replaced but keeps its body state. Headers for an epoch other than the
 	// mailbox's current UIDVALIDITY are rejected.
 	UpsertHeaders(ctx context.Context, account string, headers []model.MessageHeader) error
 	// DeleteMissing deletes the cached messages of one epoch whose UIDs are not
-	// in keep. It returns the number of deleted messages.
+	// in keep. Deletes run in transactions of at most 1000 rows each. It returns
+	// the number of deleted messages.
 	DeleteMissing(ctx context.Context, account, mailbox string, uidValidity uint32, keep []uint32) (int, error)
 	// UpdateFlags sets the flags of the listed messages of one epoch in one
 	// transaction. Unknown UIDs are ignored.
@@ -131,8 +153,11 @@ type Store interface {
 	// MarkBodyFailed records one failed body fetch for a message.
 	MarkBodyFailed(ctx context.Context, key MessageKey) error
 	// PendingBodies returns up to limit messages of the account that have no
-	// body and fewer than MaxBodyAttempts failures, newest first.
-	PendingBodies(ctx context.Context, account string, limit int) ([]MessageKey, error)
+	// body and fewer than MaxBodyAttempts failures, newest first. Pass the last
+	// message of the previous page as after (nil for the first page). Paging
+	// with a cursor means a message that failed in this run is not offered
+	// again in the same run.
+	PendingBodies(ctx context.Context, account string, after *PendingCursor, limit int) ([]PendingBody, error)
 
 	// Counts returns the message and body counts of every mailbox of the account.
 	Counts(ctx context.Context, account string) ([]MailboxCounts, error)

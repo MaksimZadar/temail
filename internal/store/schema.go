@@ -52,7 +52,17 @@ CREATE TABLE bodies (
 		REFERENCES messages (account, mailbox, uidvalidity, uid) ON DELETE CASCADE
 );
 `,
+	schemaV2,
 }
+
+// v2: the body queue index follows the cursor order used by PendingBodies.
+// Added after v1 was written on an unmerged branch; kept as a migration so
+// databases created from v1 upgrade too.
+const schemaV2 = `
+DROP INDEX messages_body_pending;
+CREATE INDEX messages_body_pending ON messages
+	(account, date DESC, mailbox DESC, uidvalidity DESC, uid DESC) WHERE body_state = 'none';
+`
 
 // SchemaVersion is the schema version this build writes.
 var SchemaVersion = len(migrations)

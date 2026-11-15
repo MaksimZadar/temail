@@ -42,15 +42,10 @@ func Open(path string) (Store, error) {
 	if err := ensureFile(path); err != nil {
 		return nil, err
 	}
-	dsn := "file:" + path + "?" + url.Values{
-		"_pragma": []string{
-			"busy_timeout(5000)",
-			"journal_mode(WAL)",
-			"foreign_keys(1)",
-			"synchronous(NORMAL)",
-		},
-		"_txlock": []string{"immediate"},
-	}.Encode()
+	dsn, err := sqliteDSN(path)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open cache: %w", err)
@@ -77,30 +72,67 @@ func ensureFile(path string) error {
 	return f.Close()
 }
 
+// sqliteDSN returns a file: URI for path with the per-connection pragmas. The
+// path is escaped by net/url, so "?", "#", "%" and spaces in it are safe.
+// Windows drive paths (C:/x) become /C:/x inside the URI.
+func sqliteDSN(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve cache path: %w", err)
+	}
+	p := filepath.ToSlash(abs)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	u := url.URL{
+		Scheme: "file",
+		Path:   p,
+		RawQuery: url.Values{
+			"_pragma": []string{
+				"busy_timeout(5000)",
+				"journal_mode(WAL)",
+				"foreign_keys(1)",
+				"synchronous(NORMAL)",
+			},
+			"_txlock": []string{"immediate"},
+		}.Encode(),
+	}
+	return u.String(), nil
+}
+
 // migrate applies every migration above the database's user_version. Each
 // migration and its version bump run in one transaction.
 func (s *sqliteStore) migrate(ctx context.Context) error {
-	var v int
-	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v); err != nil {
-		return fmt.Errorf("read schema version: %w", err)
-	}
-	if v > SchemaVersion {
-		return fmt.Errorf("cache schema version %d is newer than this build supports (%d)", v, SchemaVersion)
-	}
-	for i := v; i < SchemaVersion; i++ {
+	for {
+		done := false
 		err := s.inTx(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
+			// The version is read after BEGIN IMMEDIATE holds the write lock, so
+			// two processes opening the same file cannot both apply a migration.
+			var v int
+			if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v); err != nil {
+				return fmt.Errorf("read schema version: %w", err)
+			}
+			switch {
+			case v > SchemaVersion:
+				return fmt.Errorf("cache schema version %d is newer than this build supports (%d)", v, SchemaVersion)
+			case v == SchemaVersion:
+				done = true
+				return nil
+			}
+			if _, err := tx.ExecContext(ctx, migrations[v]); err != nil {
 				return err
 			}
 			// PRAGMA does not accept bound parameters; the value is an int.
-			_, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", i+1))
+			_, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v+1))
 			return err
 		})
 		if err != nil {
-			return fmt.Errorf("migrate cache to schema v%d: %w", i+1, err)
+			return fmt.Errorf("migrate cache: %w", err)
+		}
+		if done {
+			return nil
 		}
 	}
-	return nil
 }
 
 // Close implements Store.
@@ -121,53 +153,98 @@ func (s *sqliteStore) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
 
 // UpsertMailboxes implements Store.
 func (s *sqliteStore) UpsertMailboxes(ctx context.Context, account string, boxes []model.Mailbox) error {
-	return s.inTx(ctx, func(tx *sql.Tx) error {
-		for _, b := range boxes {
-			var cur sql.NullInt64
-			err := tx.QueryRowContext(ctx,
-				`SELECT uidvalidity FROM mailboxes WHERE account = ? AND name = ?`, account, b.Name,
-			).Scan(&cur)
-			switch {
-			case errors.Is(err, sql.ErrNoRows):
-				// new mailbox
-			case err != nil:
+	for _, b := range boxes {
+		stale, err := s.epochChanged(ctx, account, b.Name, b.UIDValidity)
+		if err != nil {
+			return err
+		}
+		if stale {
+			// Cached UIDs from the old epoch are invalid. Purge in chunks first;
+			// if this is interrupted, the old validity is still stored and the
+			// next run purges again.
+			if err := s.purgeMailboxChunked(ctx, account, b.Name); err != nil {
 				return err
-			case uint32(cur.Int64) != b.UIDValidity:
-				// Epoch changed: the cached UIDs belong to the old epoch.
-				if err := purgeMailbox(ctx, tx, account, b.Name); err != nil {
-					return err
-				}
 			}
+		}
+		err = s.inTx(ctx, func(tx *sql.Tx) error {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO mailboxes (account, name, kind, display_name, uidvalidity)
 				VALUES (?, ?, ?, ?, ?)
 				ON CONFLICT (account, name) DO UPDATE SET
 					kind = excluded.kind,
 					display_name = excluded.display_name,
-					uidvalidity = excluded.uidvalidity`,
+					uidvalidity = CASE WHEN excluded.uidvalidity = 0
+						THEN mailboxes.uidvalidity ELSE excluded.uidvalidity END`,
 				account, b.Name, string(b.Kind), b.DisplayName, b.UIDValidity,
 			); err != nil {
 				return fmt.Errorf("upsert mailbox %s: %w", b.Name, err)
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
+}
+
+// epochChanged reports whether the cached UIDVALIDITY of a mailbox differs from
+// a known new one. A zero value on either side means unknown, so it never
+// counts as a change: a zero must not wipe a cache.
+func (s *sqliteStore) epochChanged(ctx context.Context, account, name string, uidValidity uint32) (bool, error) {
+	var cur uint32
+	err := s.db.QueryRowContext(ctx,
+		`SELECT uidvalidity FROM mailboxes WHERE account = ? AND name = ?`, account, name).Scan(&cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return cur != 0 && uidValidity != 0 && cur != uidValidity, nil
 }
 
 // DeleteMailboxesNotIn implements Store.
 func (s *sqliteStore) DeleteMailboxesNotIn(ctx context.Context, account string, names []string) error {
-	return s.inTx(ctx, func(tx *sql.Tx) error {
-		args := []any{account}
-		q := `DELETE FROM mailboxes WHERE account = ?`
-		if len(names) > 0 {
-			q += ` AND name NOT IN (` + placeholders(len(names)) + `)`
-			for _, n := range names {
-				args = append(args, n)
-			}
-		}
-		_, err := tx.ExecContext(ctx, q, args...)
+	if len(names) == 0 {
+		// An empty listing is more likely a failed or partial listing than a
+		// real state, and it would wipe every mailbox of the account.
+		return ErrEmptyListing
+	}
+	keep := make(map[string]bool, len(names))
+	for _, n := range names {
+		keep[n] = true
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM mailboxes WHERE account = ?`, account)
+	if err != nil {
 		return err
-	})
+	}
+	var gone []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if !keep[n] {
+			gone = append(gone, n)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, n := range gone {
+		if err := s.purgeMailboxChunked(ctx, account, n); err != nil {
+			return err
+		}
+		if err := s.inTx(ctx, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `DELETE FROM mailboxes WHERE account = ? AND name = ?`, account, n)
+			return err
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetSyncState implements Store.
@@ -209,20 +286,43 @@ func (s *sqliteStore) MarkSynced(ctx context.Context, account, mailbox string, a
 
 // PurgeMailbox implements Store.
 func (s *sqliteStore) PurgeMailbox(ctx context.Context, account, mailbox string) error {
-	return s.inTx(ctx, func(tx *sql.Tx) error {
-		return purgeMailbox(ctx, tx, account, mailbox)
-	})
+	return s.purgeMailboxChunked(ctx, account, mailbox)
 }
 
-func purgeMailbox(ctx context.Context, tx *sql.Tx, account, mailbox string) error {
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM messages WHERE account = ? AND mailbox = ?`, account, mailbox); err != nil {
-		return fmt.Errorf("purge messages of %s: %w", mailbox, err)
+// purgeChunk bounds the rows deleted per transaction, so a large purge does not
+// hold the write lock for long.
+const purgeChunk = 1000
+
+// purgeMailboxChunked deletes the messages (and, by cascade, the bodies) of a
+// mailbox in transactions of purgeChunk rows, then resets its sync state. An
+// interrupted purge leaves a state that the next call finishes.
+func (s *sqliteStore) purgeMailboxChunked(ctx context.Context, account, mailbox string) error {
+	for {
+		var n int64
+		err := s.inTx(ctx, func(tx *sql.Tx) error {
+			res, err := tx.ExecContext(ctx, `
+				DELETE FROM messages WHERE rowid IN (
+					SELECT rowid FROM messages WHERE account = ? AND mailbox = ? LIMIT ?)`,
+				account, mailbox, purgeChunk)
+			if err != nil {
+				return fmt.Errorf("purge messages of %s: %w", mailbox, err)
+			}
+			n, _ = res.RowsAffected()
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			break
+		}
 	}
-	_, err := tx.ExecContext(ctx,
-		`UPDATE mailboxes SET highest_uid = 0, last_sync = 0 WHERE account = ? AND name = ?`,
-		account, mailbox)
-	return err
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE mailboxes SET highest_uid = 0, last_sync = 0 WHERE account = ? AND name = ?`,
+			account, mailbox)
+		return err
+	})
 }
 
 // CachedUIDs implements Store.
@@ -242,6 +342,31 @@ func (s *sqliteStore) CachedUIDs(ctx context.Context, account, mailbox string, u
 			return nil, err
 		}
 		out = append(out, uid)
+	}
+	return out, rows.Err()
+}
+
+// CachedFlags implements Store.
+func (s *sqliteStore) CachedFlags(ctx context.Context, account, mailbox string, uidValidity uint32) (map[uint32][]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT uid, flags FROM messages
+		WHERE account = ? AND mailbox = ? AND uidvalidity = ?`, account, mailbox, uidValidity)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[uint32][]string{}
+	for rows.Next() {
+		var uid uint32
+		var enc string
+		if err := rows.Scan(&uid, &enc); err != nil {
+			return nil, err
+		}
+		var flags []string
+		if err := json.Unmarshal([]byte(enc), &flags); err != nil {
+			return nil, fmt.Errorf("decode flags of UID %d: %w", uid, err)
+		}
+		out[uid] = flags
 	}
 	return out, rows.Err()
 }
@@ -305,7 +430,7 @@ func (s *sqliteStore) UpsertHeaders(ctx context.Context, account string, headers
 			if err != nil {
 				return err
 			}
-			flags, err := json.Marshal(normalizeFlags(h.Flags))
+			flags, err := json.Marshal(NormalizeFlags(h.Flags))
 			if err != nil {
 				return err
 			}
@@ -330,38 +455,44 @@ func (s *sqliteStore) UpsertHeaders(ctx context.Context, account string, headers
 // DeleteMissing implements Store. The keep set goes into a temporary table, so
 // the statement does not depend on the SQLite parameter limit.
 func (s *sqliteStore) DeleteMissing(ctx context.Context, account, mailbox string, uidValidity uint32, keep []uint32) (int, error) {
-	var deleted int64
-	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS temp.keep_uids`); err != nil {
-			return err
+	cached, err := s.CachedUIDs(ctx, account, mailbox, uidValidity)
+	if err != nil {
+		return 0, err
+	}
+	keepSet := make(map[uint32]bool, len(keep))
+	for _, uid := range keep {
+		keepSet[uid] = true
+	}
+	var missing []uint32
+	for _, uid := range cached {
+		if !keepSet[uid] {
+			missing = append(missing, uid)
 		}
-		if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE keep_uids (uid INTEGER PRIMARY KEY)`); err != nil {
-			return err
+	}
+	deleted := 0
+	for start := 0; start < len(missing); start += purgeChunk {
+		batch := missing[start:min(start+purgeChunk, len(missing))]
+		args := []any{account, mailbox, uidValidity}
+		for _, uid := range batch {
+			args = append(args, uid)
 		}
-		defer func() { _, _ = tx.ExecContext(ctx, `DROP TABLE IF EXISTS temp.keep_uids`) }()
-		stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO temp.keep_uids (uid) VALUES (?)`)
-		if err != nil {
-			return err
-		}
-		for _, uid := range keep {
-			if _, err := stmt.ExecContext(ctx, uid); err != nil {
-				_ = stmt.Close()
+		err := s.inTx(ctx, func(tx *sql.Tx) error {
+			res, err := tx.ExecContext(ctx, `
+				DELETE FROM messages
+				WHERE account = ? AND mailbox = ? AND uidvalidity = ?
+				  AND uid IN (`+placeholders(len(batch))+`)`, args...)
+			if err != nil {
 				return err
 			}
-		}
-		_ = stmt.Close()
-		res, err := tx.ExecContext(ctx, `
-			DELETE FROM messages
-			WHERE account = ? AND mailbox = ? AND uidvalidity = ?
-			  AND uid NOT IN (SELECT uid FROM temp.keep_uids)`,
-			account, mailbox, uidValidity)
+			n, _ := res.RowsAffected()
+			deleted += int(n)
+			return nil
+		})
 		if err != nil {
-			return err
+			return deleted, err
 		}
-		deleted, err = res.RowsAffected()
-		return err
-	})
-	return int(deleted), err
+	}
+	return deleted, nil
 }
 
 // UpdateFlags implements Store.
@@ -378,7 +509,7 @@ func (s *sqliteStore) UpdateFlags(ctx context.Context, account, mailbox string, 
 		}
 		defer stmt.Close()
 		for _, u := range updates {
-			enc, err := json.Marshal(normalizeFlags(u.Flags))
+			enc, err := json.Marshal(NormalizeFlags(u.Flags))
 			if err != nil {
 				return err
 			}
@@ -566,26 +697,41 @@ func (s *sqliteStore) MarkBodyFailed(ctx context.Context, key MessageKey) error 
 }
 
 // PendingBodies implements Store. It uses the partial index on body_state.
-func (s *sqliteStore) PendingBodies(ctx context.Context, account string, limit int) ([]MessageKey, error) {
+func (s *sqliteStore) PendingBodies(ctx context.Context, account string, after *PendingCursor, limit int) ([]PendingBody, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: pending limit %d must be positive", limit)
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT mailbox, uidvalidity, uid FROM messages
-		WHERE account = ? AND body_state = 'none' AND body_attempts < ?
-		ORDER BY date DESC, uid DESC
-		LIMIT ?`, account, MaxBodyAttempts, limit)
+	q := `
+		SELECT mailbox, uidvalidity, uid, date FROM messages
+		WHERE account = ? AND body_state = 'none' AND body_attempts < ?`
+	args := []any{account, MaxBodyAttempts}
+	if after != nil {
+		// Strictly after the cursor in the order below (row-value comparison is
+		// written out so it works with mixed sort directions).
+		d := toMillis(after.Date)
+		q += ` AND (date < ? OR (date = ? AND (mailbox < ? OR (mailbox = ? AND
+			(uidvalidity < ? OR (uidvalidity = ? AND uid < ?))))))`
+		k := after.Key
+		args = append(args, d, d, k.Mailbox, k.Mailbox, k.UIDValidity, k.UIDValidity, k.UID)
+	}
+	q += ` ORDER BY date DESC, mailbox DESC, uidvalidity DESC, uid DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []MessageKey
+	var out []PendingBody
 	for rows.Next() {
-		k := MessageKey{Account: account}
-		if err := rows.Scan(&k.Mailbox, &k.UIDValidity, &k.UID); err != nil {
+		var pb PendingBody
+		var d int64
+		pb.Key.Account = account
+		if err := rows.Scan(&pb.Key.Mailbox, &pb.Key.UIDValidity, &pb.Key.UID, &d); err != nil {
 			return nil, err
 		}
-		out = append(out, k)
+		pb.Date = fromMillis(d)
+		out = append(out, pb)
 	}
 	return out, rows.Err()
 }
@@ -616,9 +762,9 @@ func (s *sqliteStore) Counts(ctx context.Context, account string) ([]MailboxCoun
 	return out, rows.Err()
 }
 
-// normalizeFlags returns a sorted copy with duplicates removed, so the same
+// NormalizeFlags returns a sorted copy with duplicates removed, so the same
 // flag set always encodes the same way. It never returns nil.
-func normalizeFlags(in []string) []string {
+func NormalizeFlags(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, f := range in {
 		if f != "" && !slices.Contains(out, f) {
