@@ -4,6 +4,7 @@
   import { ui } from "./lib/stores/ui.svelte";
   import { Dispatcher } from "./lib/keys/dispatcher";
   import Wizard from "./lib/components/Wizard.svelte";
+  import Settings from "./lib/components/Settings.svelte";
   import MainView from "./lib/components/MainView.svelte";
   import Footer from "./lib/components/Footer.svelte";
   import HelpOverlay from "./lib/components/HelpOverlay.svelte";
@@ -12,7 +13,12 @@
   import WhichKey from "./lib/components/WhichKey.svelte";
 
   $effect(() => {
-    ui.context = app.route === "main" ? "main" : "wizard";
+    ui.context =
+      app.route !== "main"
+        ? "wizard"
+        : ui.screen === "settings"
+          ? "settings"
+          : "main";
   });
 
   onMount(() => {
@@ -63,7 +69,11 @@
     {#if app.route === "setup"}
       <Wizard />
     {:else if app.route === "main"}
-      <MainView />
+      {#if ui.screen === "settings"}
+        <Settings />
+      {:else}
+        <MainView />
+      {/if}
     {:else}
       <p class="loading" role="status">Loading…</p>
     {/if}

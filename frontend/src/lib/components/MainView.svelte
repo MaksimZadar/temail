@@ -128,6 +128,7 @@
         ui.paletteQuery = "Go to ";
         ui.overlay = "palette";
       }),
+      ui.register("settings.open", () => (ui.screen = "settings")),
       ui.register("sync.refresh", () => {
         void api.syncStart().catch(() => ui.flash("Couldn't start a sync"));
       }),
