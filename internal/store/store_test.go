@@ -218,7 +218,7 @@ func TestUpsertHeadersKeepsBodyStateAndRejectsStaleEpoch(t *testing.T) {
 	if err := s.UpsertHeaders(ctx, acct, []model.MessageHeader{h}); err != nil {
 		t.Fatal(err)
 	}
-	pending, _ := s.PendingBodies(ctx, acct, 10)
+	pending, _ := pendingKeys(ctx, s, 10)
 	if len(pending) != 0 {
 		t.Errorf("header refresh reset body state: pending %v", pending)
 	}
@@ -353,7 +353,7 @@ func TestBodiesGzipRoundTripAndPendingOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pending, err := s.PendingBodies(ctx, acct, 10)
+	pending, err := pendingKeys(ctx, s, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestBodiesGzipRoundTripAndPendingOrder(t *testing.T) {
 		t.Errorf("attachments_meta_json = %q", raw)
 	}
 
-	pending, _ = s.PendingBodies(ctx, acct, 10)
+	pending, _ = pendingKeys(ctx, s, 10)
 	if len(pending) != 2 || pending[0] != want[1] {
 		t.Errorf("pending after one body = %v", pending)
 	}
@@ -411,14 +411,14 @@ func TestMarkBodyFailedIsBounded(t *testing.T) {
 	}
 	key := MessageKey{acct, "INBOX", 1, 1}
 	for i := 0; i < MaxBodyAttempts; i++ {
-		if p, _ := s.PendingBodies(ctx, acct, 5); len(p) != 1 {
+		if p, _ := pendingKeys(ctx, s, 5); len(p) != 1 {
 			t.Fatalf("attempt %d: message not pending", i)
 		}
 		if err := s.MarkBodyFailed(ctx, key); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if p, _ := s.PendingBodies(ctx, acct, 5); len(p) != 0 {
+	if p, _ := pendingKeys(ctx, s, 5); len(p) != 0 {
 		t.Errorf("message still pending after %d failures", MaxBodyAttempts)
 	}
 }
@@ -452,12 +452,17 @@ func TestCountsAndSyncStateAndMailboxesNotIn(t *testing.T) {
 	if len(st) != 2 {
 		t.Errorf("mailboxes after DeleteMailboxesNotIn = %+v", st)
 	}
-	if err := s.DeleteMailboxesNotIn(ctx, acct, nil); err != nil {
-		t.Fatal(err)
+	// An empty listing must not wipe the account's mailboxes.
+	if err := s.DeleteMailboxesNotIn(ctx, acct, nil); !errors.Is(err, ErrEmptyListing) {
+		t.Fatalf("empty listing: err = %v, want ErrEmptyListing", err)
 	}
 	st, _ = s.GetSyncState(ctx, acct)
-	if len(st) != 0 {
-		t.Errorf("empty keep list should remove all mailboxes: %+v", st)
+	if len(st) != 2 {
+		t.Errorf("empty listing removed mailboxes: %+v", st)
+	}
+	// Dropping INBOX from the listing removes its messages too.
+	if err := s.DeleteMailboxesNotIn(ctx, acct, []string{"Archive"}); err != nil {
+		t.Fatal(err)
 	}
 	var n int
 	if err := s.(*sqliteStore).db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil || n != 0 {
@@ -494,6 +499,19 @@ func TestDefaultPathLinuxXDG(t *testing.T) {
 	if want := filepath.Join(home, ".local", "share", "temail", "cache.db"); got != want {
 		t.Errorf("relative XDG_DATA_HOME: DefaultPath = %s, want %s", got, want)
 	}
+}
+
+// pendingKeys returns the keys of the first page of PendingBodies.
+func pendingKeys(ctx context.Context, s Store, limit int) ([]MessageKey, error) {
+	page, err := s.PendingBodies(ctx, acct, nil, limit)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]MessageKey, 0, len(page))
+	for _, p := range page {
+		keys = append(keys, p.Key)
+	}
+	return keys, nil
 }
 
 func uids(hs []model.MessageHeader) []uint32 {

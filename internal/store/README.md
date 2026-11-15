@@ -21,7 +21,8 @@ and SHM files with the same mode.
 
 ## Connection settings
 
-Set on every connection through the DSN:
+The DSN is a `file:` URI built with `net/url`, so a path with `?`, `#`, `%`
+or spaces opens the file it names. Pragmas are set on every connection:
 
 - `journal_mode(WAL)`: readers (the UI) do not block the sync writer.
 - `foreign_keys(1)`: deleting a mailbox removes its messages, and deleting a
@@ -30,13 +31,19 @@ Set on every connection through the DSN:
 - `_txlock=immediate`: write transactions take the write lock at `BEGIN`, so
   they wait instead of failing with `SQLITE_BUSY` on upgrade.
 
-## Schema (version 1)
+## Schema (version 2)
 
 Versioned with `PRAGMA user_version`. `migrations` in `schema.go` is an
 ordered list, and `migrations[i]` takes the database from version `i` to `i+1`.
-Each migration runs in one transaction with its version bump. A database whose
-version is newer than this build is refused with an error. Shipped migrations
-are never edited.
+Each migration runs in one transaction with its version bump. Migrations are
+applied in a loop: each step opens an `IMMEDIATE` transaction (write lock)
+and reads `user_version` inside it, so two processes opening the same new file
+cannot apply the same migration twice. A database whose version is newer than
+this build is refused with an error. Shipped migrations are never edited.
+
+- v1: tables and the first body index.
+- v2: rebuilds `messages_body_pending` for the cursor order used by
+  `PendingBodies`. It was added after v1 was written on an unmerged branch.
 
 ```
 mailboxes(account, name, kind, display_name, uidvalidity,
@@ -55,8 +62,9 @@ Indexes:
 - `messages_mailbox_date (account, mailbox, date DESC, uid DESC)`: list pages.
 - `messages_message_id (message_id)`: stable identity lookups (undo), not
   unique and not a key.
-- `messages_body_pending (account, date DESC, uid DESC) WHERE body_state = 'none'`:
-  the body queue. It is a partial index, so it shrinks as bodies arrive.
+- `messages_body_pending (account, date DESC, mailbox DESC, uidvalidity DESC, uid DESC) WHERE body_state = 'none'`:
+  the body queue, in the order `PendingBodies` pages through. It is a partial
+  index, so it shrinks as bodies arrive.
 
 Column notes:
 
@@ -80,6 +88,10 @@ UIDVALIDITY changes, `UpsertMailboxes` purges that mailbox in the same
 transaction. Its messages, bodies and sync state go, and the mailbox row stays
 with the new value. Nothing is remapped.
 
+A UIDVALIDITY of 0 means unknown. `UpsertMailboxes` never purges because of
+0, and it never overwrites a stored value with 0. The sync also refuses to
+cache a mailbox whose server reports 0.
+
 `UpsertHeaders` rejects a header whose UIDVALIDITY does not match the
 mailbox's current one, so a stale fetch cannot write into a new epoch.
 
@@ -91,25 +103,29 @@ write method runs in one transaction. Batch writes (`UpsertHeaders`,
 
 | Method | Purpose |
 |--------|---------|
-| `UpsertMailboxes` | Insert or update mailboxes. Purges a mailbox whose UIDVALIDITY changed. |
-| `DeleteMailboxesNotIn` | Drop mailboxes that the server no longer lists. |
+| `UpsertMailboxes` | Insert or update mailboxes. Purges a mailbox whose UIDVALIDITY changed (in chunks, before the row is updated). |
+| `DeleteMailboxesNotIn` | Drop mailboxes that the server no longer lists. Refuses an empty list (`ErrEmptyListing`). Mailboxes are purged in chunks first. |
 | `GetSyncState` | Per-mailbox UIDVALIDITY, highest UID, last sync time. |
 | `MarkSynced` | Record a completed sync of a mailbox. |
-| `PurgeMailbox` | Delete a mailbox's messages and bodies. Keep the row. |
+| `PurgeMailbox` | Delete a mailbox's messages and bodies (in chunks of 1000 rows). Keep the row. |
 | `CachedUIDs` | UIDs cached for one epoch, ascending. |
+| `CachedFlags` | Cached flags of one epoch, by UID. Used to write only changed flags. |
 | `UpsertHeaders` | Batch insert or replace headers. Keeps `body_state`. |
-| `DeleteMissing` | Delete cached UIDs that are not in the keep set. The keep set goes through a temp table, so the SQLite parameter limit does not apply. |
+| `DeleteMissing` | Delete cached UIDs that are not in the keep set, in transactions of at most 1000 rows. |
 | `UpdateFlags` | Set flags on cached messages. Unknown UIDs are ignored. |
 | `ListMessages` | Headers of one mailbox, newest first. Keyset pagination with `Cursor{Date, UID}`. Limit 1 to 1000. |
 | `GetMessage` / `GetBody` | One header or body. `ErrNotFound` if absent. |
 | `SetBody` | Store a body and set `body_state = cached`. |
 | `MarkBodyFailed` | Count a failed body fetch. |
-| `PendingBodies` | Up to N messages with no body and fewer than `MaxBodyAttempts` (3) failures, newest first. |
+| `PendingBodies` | Up to N messages with no body and fewer than `MaxBodyAttempts` (3) failures, newest first. Takes a `*PendingCursor` (the last message of the previous page; nil for the first page), so paging visits each message once. |
 | `Counts` | Messages and cached bodies per mailbox. |
 
 ## Tests
 
-`store_test.go` runs on a SQLite file in `t.TempDir()`. It covers file and
+`store_test.go` and `regress_test.go` run on SQLite files in `t.TempDir()`.
+`regress_test.go` covers paths with URI-special characters, concurrent first
+open, upgrade from v1, UIDVALIDITY 0, chunked purge and delete, the flags read,
+and cursor paging. It covers file and
 directory modes, WAL, foreign keys, the schema version and refusal of newer
 versions, keyset paging with equal dates, purge on UIDVALIDITY change, cascade
 on purge, the body round trip through gzip, the attempt bound, flag
