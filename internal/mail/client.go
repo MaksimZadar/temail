@@ -39,6 +39,12 @@ type Client interface {
 	// ordered by UID. It fetches in batches of BatchSize.
 	FetchHeaders(ctx context.Context, mailbox string, rng UIDRange) ([]model.MessageHeader, error)
 
+	// ListUIDs returns the UID and flags of every message in a mailbox, with
+	// the mailbox's UIDVALIDITY. It transfers no headers or bodies, so it is
+	// the cheap way to find server-side deletions and flag changes. It issues
+	// UID SEARCH and UID FETCH FLAGS only.
+	ListUIDs(ctx context.Context, mailbox string) (UIDListing, error)
+
 	// FetchMessage returns one message with sanitised HTML, the plain-text body
 	// and its attachment list. It does not set \Seen.
 	FetchMessage(ctx context.Context, mailbox string, uid uint32) (model.Message, error)
@@ -70,6 +76,19 @@ func UIDsAbove(n uint32) UIDRange {
 // AllUIDs returns the range of every UID.
 func AllUIDs() UIDRange {
 	return UIDRange{First: 1}
+}
+
+// UIDListing is the UID and flag state of every message in one mailbox. UIDs
+// are ascending.
+type UIDListing struct {
+	UIDValidity uint32
+	Messages    []UIDState
+}
+
+// UIDState is one message's UID and current IMAP flags.
+type UIDState struct {
+	UID   uint32
+	Flags []string
 }
 
 // MailboxInfo is the UID state of a selected mailbox.
