@@ -3,13 +3,14 @@ package mail
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 )
 
-// ListUIDs implements Client. It runs UID SEARCH ALL, then UID FETCH FLAGS in
-// batches of BatchSize. Both are read-only; the mailbox is opened with EXAMINE.
+// ListUIDs implements Client. It runs one UID FETCH 1:* (UID FLAGS). The
+// mailbox is opened with EXAMINE, so the command is read-only.
 func (c *imapClient) ListUIDs(ctx context.Context, mailbox string) (UIDListing, error) {
 	cl, end, err := c.begin(ctx)
 	if err != nil {
@@ -21,24 +22,17 @@ func (c *imapClient) ListUIDs(ctx context.Context, mailbox string) (UIDListing, 
 	if err != nil {
 		return UIDListing{}, opErr(ctx, err)
 	}
-	uids, err := searchUIDs(cl, AllUIDs())
+	// One FETCH covers the whole mailbox: "UID 1:*" returns every message,
+	// with no SEARCH and no per-batch round trip.
+	bufs, err := cl.Fetch(imap.UIDSet{{Start: 1, Stop: 0}}, flagFetchOptions()).Collect()
 	if err != nil {
-		return UIDListing{}, opErr(ctx, fmt.Errorf("search UIDs in %s: %w", mailbox, err))
+		return UIDListing{}, opErr(ctx, fmt.Errorf("fetch flags from %s: %w", mailbox, err))
 	}
-	out := UIDListing{UIDValidity: data.UIDValidity, Messages: make([]UIDState, 0, len(uids))}
-	for start := 0; start < len(uids); start += BatchSize {
-		if err := ctx.Err(); err != nil {
-			return UIDListing{}, err
-		}
-		end := min(start+BatchSize, len(uids))
-		bufs, err := cl.Fetch(imap.UIDSetNum(uids[start:end]...), flagFetchOptions()).Collect()
-		if err != nil {
-			return UIDListing{}, opErr(ctx, fmt.Errorf("fetch flags from %s: %w", mailbox, err))
-		}
-		for _, buf := range bufs {
-			out.Messages = append(out.Messages, uidStateFromBuffer(buf))
-		}
+	out := UIDListing{UIDValidity: data.UIDValidity, Messages: make([]UIDState, 0, len(bufs))}
+	for _, buf := range bufs {
+		out.Messages = append(out.Messages, uidStateFromBuffer(buf))
 	}
+	sort.Slice(out.Messages, func(i, j int) bool { return out.Messages[i].UID < out.Messages[j].UID })
 	return out, nil
 }
 

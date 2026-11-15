@@ -80,6 +80,11 @@ func (c *imapClient) Connect(ctx context.Context, acct config.BridgeAccount, pas
 			return cerr
 		}
 		// The error text is the server's; the password is never included.
+		var imapErr *imap.Error
+		if errors.As(err, &imapErr) {
+			// The server answered NO or BAD: a credential problem, not a dropped connection.
+			return fmt.Errorf("%w: log in to Bridge as %s: %w", ErrAuthFailed, acct.Username, err)
+		}
 		return fmt.Errorf("log in to Bridge as %s: %w", acct.Username, err)
 	}
 	return nil
@@ -281,11 +286,11 @@ func (c *imapClient) FetchMessage(ctx context.Context, mailbox string, uid uint3
 		return model.Message{}, opErr(ctx, fmt.Errorf("fetch UID %d from %s: %w", uid, mailbox, err))
 	}
 	if len(bufs) != 1 {
-		return model.Message{}, fmt.Errorf("message UID %d not found in %s", uid, mailbox)
+		return model.Message{}, fmt.Errorf("%w: UID %d in %s", ErrMessageNotFound, uid, mailbox)
 	}
 	msg, err := messageFromBuffer(mailbox, data.UIDValidity, bufs[0])
 	if err != nil {
-		return model.Message{}, fmt.Errorf("parse UID %d in %s: %w", uid, mailbox, err)
+		return model.Message{}, fmt.Errorf("%w: UID %d in %s: %v", ErrParse, uid, mailbox, err)
 	}
 	return msg, nil
 }

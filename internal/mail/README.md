@@ -56,8 +56,8 @@ listed.
   the incremental-sync range. The server's `n:*` answer is filtered so that a
   range above the highest UID returns nothing.
 - **UID listing.** `ListUIDs(mailbox)` returns the UIDVALIDITY and every
-  message's UID and flags. It issues `UID SEARCH ALL` and `UID FETCH FLAGS` in
-  batches of `BatchSize`, with no headers or bodies. The sync uses it to plan
+  message's UID and flags. It issues one `UID FETCH 1:* (UID FLAGS)` per
+  mailbox, with no SEARCH and no headers or bodies. The sync uses it to plan
   header fetches and to reconcile deletions and flags.
 - **Mailbox state.** `MailboxInfo` returns `UIDValidity`, `UIDNext`,
   `HighestUID` (`UIDNext-1`, an upper bound that may include expunged UIDs) and
@@ -85,6 +85,16 @@ listed.
 
 The result is still untrusted. The UI must render it in a sandboxed iframe
 without scripts (see `docs/ARCHITECTURE.md` §3.1).
+
+## Errors the sync layer relies on
+
+- `ErrAuthFailed`: Bridge answered NO or BAD to LOGIN (a rejected password).
+  Connection failures during LOGIN are not wrapped in it.
+- `ErrMessageNotFound`: the UID is not in the mailbox any more.
+- `ErrParse`: a fetched message could not be parsed.
+- Server replies are `*imap.Error` (go-imap) and can be unwrapped with
+  `errors.As`. Transport failures are network or IO errors (`net.Error`,
+  `io.EOF`, `net.ErrClosed`) and `ErrNotConnected`.
 
 ## Connection and TLS
 
@@ -116,7 +126,7 @@ confirmation. `cmd/mailprobe -trust` only pins untrusted certificates.
 
 ## Tests
 
-`uids_test.go` covers `ListUIDs`: batching, flags, UIDVALIDITY and an empty mailbox.
+`uids_test.go` covers `ListUIDs`: a single fetch, flags, UIDVALIDITY and an empty mailbox.
 `bridge_test.go` starts an in-memory IMAP server (`imapserver/imapmemserver`)
 on `127.0.0.1` with a self-signed certificate. `fixtures_test.go` holds the
 messages: multipart/alternative, HTML with script and remote image, attachments

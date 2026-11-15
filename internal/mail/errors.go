@@ -18,6 +18,17 @@ var ErrCertMismatch = errors.New("bridge certificate does not match the pinned c
 // only talks to Bridge on the local machine.
 var ErrNotLoopback = errors.New("bridge host must be a loopback address (127.0.0.1, ::1 or localhost)")
 
+// ErrAuthFailed means Bridge refused the login (the server answered NO or BAD
+// to LOGIN, for example a wrong Bridge password). Retrying cannot fix it.
+var ErrAuthFailed = errors.New("bridge refused the login")
+
+// ErrMessageNotFound means the server no longer has the UID in the mailbox.
+var ErrMessageNotFound = errors.New("message not found on the server")
+
+// ErrParse means a fetched message could not be parsed. Retrying returns the
+// same bytes, so it is deterministic.
+var ErrParse = errors.New("message could not be parsed")
+
 // ErrNotConnected is returned by operations before Connect succeeds, or after
 // Close.
 var ErrNotConnected = errors.New("not connected to Bridge")

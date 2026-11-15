@@ -29,8 +29,8 @@ func TestListUIDsReturnsUIDsAndFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := fx.rec.stats().fetches - fetchesBefore; n != 2 {
-		t.Errorf("FETCH commands for %d UIDs = %d, want 2 (batch size %d)", total+1, n, BatchSize)
+	if n := fx.rec.stats().fetches - fetchesBefore; n != 1 {
+		t.Errorf("FETCH commands for %d UIDs = %d, want 1 (UID 1:*)", total+1, n)
 	}
 	if got.UIDValidity != info.UIDValidity {
 		t.Errorf("UIDValidity = %d, want %d", got.UIDValidity, info.UIDValidity)
