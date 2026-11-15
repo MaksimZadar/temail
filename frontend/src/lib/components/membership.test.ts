@@ -10,6 +10,7 @@ vi.mock("../api", () => ({
   getAttachment: vi.fn(),
   openUrl: vi.fn(),
   cacheInfo: vi.fn(async () => ({ bytes: 0, messages: 0, bodies: 0 })),
+  syncStart: vi.fn(async () => {}),
   syncStatus: vi.fn(async () => ({
     running: false,
     watching: true,
@@ -195,6 +196,36 @@ describe("label chips in the list", () => {
     const row = screen.getByRole("option");
     expect(within(row).queryByTitle("Work")).toBeNull();
     expect(within(row).getByTitle("Invoices")).toBeInTheDocument();
+  });
+});
+
+describe("Sync now in the sync panel and palette", () => {
+  it("the panel has a Sync now button that asks for a check", async () => {
+    const m = vi.mocked(api);
+    const SyncPanel = (await import("./SyncPanel.svelte")).default;
+    sync.watching = true;
+    sync.idle = true;
+    render(SyncPanel);
+    await fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+    expect(m.syncStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("the button is off during the first sync", async () => {
+    const SyncPanel = (await import("./SyncPanel.svelte")).default;
+    sync.running = true;
+    render(SyncPanel);
+    expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
+  });
+
+  it("the palette has Sync now", async () => {
+    const Palette = (await import("./Palette.svelte")).default;
+    const m = vi.mocked(api);
+    render(Palette);
+    const input = screen.getByRole("combobox", { name: "Command" });
+    await fireEvent.input(input, { target: { value: "sync now" } });
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent("Sync now");
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(m.syncStart).toHaveBeenCalled();
   });
 });
 

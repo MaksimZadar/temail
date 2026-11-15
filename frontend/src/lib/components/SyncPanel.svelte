@@ -29,9 +29,18 @@
   >
     <header>
       <h2>{sync.text}</h2>
-      <button class="btn" type="button" onclick={() => (ui.overlay = "none")}
-        >Close</button
-      >
+      <span class="hbtns">
+        <button
+          class="btn"
+          type="button"
+          disabled={sync.running}
+          title="Check for new mail now (g r)"
+          onclick={() => sync.syncNow()}>Sync now</button
+        >
+        <button class="btn" type="button" onclick={() => (ui.overlay = "none")}
+          >Close</button
+        >
+      </span>
     </header>
     {#if sync.messages > 0}
       <p class="dim">{sync.messages.toLocaleString()} messages cached</p>
@@ -65,6 +74,10 @@
     justify-content: space-between;
     align-items: center;
     gap: 1rem;
+  }
+  .hbtns {
+    display: flex;
+    gap: 0.4rem;
   }
   h2 {
     font-size: var(--fs-body);

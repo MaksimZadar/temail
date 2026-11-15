@@ -135,9 +135,7 @@
         ui.overlay = "palette";
       }),
       ui.register("settings.open", () => (ui.screen = "settings")),
-      ui.register("sync.refresh", () => {
-        void api.syncStart().catch(() => ui.flash("Couldn't start a sync"));
-      }),
+      ui.register("sync.refresh", () => void sync.syncNow()),
       ui.register("view.plain", () => (mail.plain = !mail.plain)),
       ui.register("view.links", () => view?.toggleLinks()),
       ui.register("copy.sender", () => {

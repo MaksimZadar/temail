@@ -3,13 +3,12 @@
   import { layout } from "../stores/layout.svelte";
   import { sync } from "../stores/sync.svelte";
   import { ui } from "../stores/ui.svelte";
-  import * as api from "../api";
 
   let { filterInput = $bindable() }: { filterInput?: HTMLInputElement } =
     $props();
 
   function refresh(): void {
-    void api.syncStart().catch(() => ui.flash("Couldn't start a sync"));
+    void sync.syncNow();
   }
   function key(e: KeyboardEvent): void {
     if (e.key === "Escape") {
@@ -74,8 +73,8 @@
     class="ib"
     class:spin={sync.running}
     type="button"
-    title="Refresh (g r)"
-    aria-label="Refresh"
+    title="Sync now (g r)"
+    aria-label="Sync now"
     onclick={refresh}
   >
     <svg viewBox="0 0 16 16" aria-hidden="true"
