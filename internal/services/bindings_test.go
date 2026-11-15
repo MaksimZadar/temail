@@ -22,6 +22,9 @@ var wantBound = map[string][]string{
 	"SyncService": {
 		"Start", "Status", "Stop",
 	},
+	"LLMService": {
+		"DeleteProvider", "ListModels", "ListProviders", "SaveProvider", "SetDefaultProvider", "TestProvider",
+	},
 }
 
 // lifecycle methods are called by Wails, not bound to the frontend.
@@ -35,6 +38,7 @@ func boundServices() map[string]reflect.Type {
 		"SetupService": reflect.TypeOf(&SetupService{}),
 		"MailService":  reflect.TypeOf(&MailService{}),
 		"SyncService":  reflect.TypeOf(&SyncService{}),
+		"LLMService":   reflect.TypeOf(&LLMService{}),
 	}
 }
 
@@ -57,12 +61,19 @@ func TestBoundMethodSetIsExact(t *testing.T) {
 }
 
 func TestBoundMethodsAreReadOnlyByName(t *testing.T) {
-	// A name check is a tripwire, not a proof. The write verbs must not appear.
-	forbidden := regexp.MustCompile(`(?i)send|delete|move|flag|store|expunge|append|smtp|llm|draft|archive`)
+	// A name check is a tripwire, not a proof. The mailbox-write verbs must not
+	// appear anywhere. LLMService may change its own config (save, delete and
+	// default a provider), but it must not reach the mailbox or send mail.
+	mailboxWrites := regexp.MustCompile(`(?i)send|move|flag|expunge|append|smtp|draft|archive`)
+	strict := regexp.MustCompile(`(?i)send|delete|move|flag|store|expunge|append|smtp|llm|draft|archive`)
 	for name, typ := range boundServices() {
+		re := strict
+		if name == "LLMService" {
+			re = mailboxWrites
+		}
 		for i := 0; i < typ.NumMethod(); i++ {
 			m := typ.Method(i).Name
-			if forbidden.MatchString(m) {
+			if re.MatchString(m) {
 				t.Errorf("%s.%s looks like a write or out-of-scope action", name, m)
 			}
 		}
@@ -80,8 +91,9 @@ func TestBoundReturnTypesHaveNoSecretFields(t *testing.T) {
 				checkNoSecretFields(t, name+"."+m.Name, m.Type.Out(j), map[reflect.Type]bool{})
 			}
 			for j := 1; j < m.Type.NumIn(); j++ {
-				// Inputs may carry the password, but only into SaveAccount.
-				if m.Name == "SaveAccount" {
+				// Inputs may carry a secret, but only into SaveAccount (password) and
+				// SaveProvider (write-only API key).
+				if m.Name == "SaveAccount" || m.Name == "SaveProvider" {
 					continue
 				}
 				checkNoSecretFields(t, name+"."+m.Name+" input", m.Type.In(j), map[reflect.Type]bool{})
@@ -114,6 +126,7 @@ var wailsCtxMethods = map[string][]string{
 	"SetupService": {"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert"},
 	"MailService":  {"CacheInfo", "GetAttachment", "GetMessage", "ListMailboxes", "ListMessages"},
 	"SyncService":  {},
+	"LLMService":   {"ListModels", "TestProvider"},
 }
 
 func TestBoundMethodsTakeWailsContext(t *testing.T) {
