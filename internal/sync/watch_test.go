@@ -41,10 +41,13 @@ func (f *fakeIdler) Connect(ctx context.Context, _ config.BridgeAccount, _ strin
 
 func (f *fakeIdler) Capabilities() []string { return f.caps }
 
-func (f *fakeIdler) Idle(ctx context.Context, mailbox string, onChange func()) error {
+func (f *fakeIdler) Idle(ctx context.Context, mailbox string, started func(), onChange func()) error {
 	f.active.Add(1)
 	defer f.active.Add(-1)
 	f.mailbox.Store(mailbox)
+	if started != nil {
+		started()
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,8 +131,8 @@ func TestIdleEventTriggersIncrementalSync(t *testing.T) {
 	done := wf.runWatch(ctx)
 
 	waitFor(t, "IDLE to start", func() bool { return idler.active.Load() == 1 })
-	if got := idler.mailbox.Load(); got != "All Mail" {
-		t.Fatalf("idle on %v, want All Mail (it is cached)", got)
+	if got := idler.mailbox.Load(); got != "INBOX" {
+		t.Fatalf("idle on %v, want INBOX (All Mail is covered by the reconcile)", got)
 	}
 	before := wf.bridge.headerFetches("INBOX", 1) + wf.bridge.headerFetches("INBOX", 2)
 	wf.bridge.appendMsg("INBOX")

@@ -96,6 +96,12 @@ type Options struct {
 	Backoff time.Duration
 	// OnProgress, if set, receives progress events.
 	OnProgress ProgressFunc
+	// Auth is the latch shared by every login path of this account (the sync
+	// connection and the watcher's connections). nil means no latch.
+	Auth *AuthLatch
+	// CredsKey identifies the credentials the latch is keyed on. The caller
+	// computes it from the account and password, and it is never logged.
+	CredsKey string
 }
 
 // Result summarises one completed or interrupted run.
@@ -166,13 +172,16 @@ func New(st store.Store, client mail.Client, connect ConnectFunc, opts Options) 
 // Run performs a full sync: mailboxes, headers, reconcile and bodies. Every
 // step commits its work as it goes, so an error or a cancelled context leaves
 // the cache consistent. Calling Run again continues from there.
+//
+// Run leaves the connection open when it returns, so a watcher that follows the
+// run reuses it instead of logging in again (each login counts toward Bridge's
+// limit). The caller closes the Syncer with Close when it has finished with it.
 func (s *Syncer) Run(ctx context.Context) (Result, error) {
 	var res Result
 	s.emit(Progress{Account: s.opts.Account, State: StateConnecting})
 	if err := s.connectWithRetry(ctx); err != nil {
 		return res, err
 	}
-	defer func() { _ = s.Close() }()
 
 	s.emit(Progress{Account: s.opts.Account, State: StateMailboxes})
 	var boxes []model.Mailbox

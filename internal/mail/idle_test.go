@@ -33,7 +33,7 @@ func TestIdleReportsNewMail(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- w.Idle(ctx, "INBOX", func() { changes.Add(1) })
+		done <- w.Idle(ctx, "INBOX", func() {}, func() { changes.Add(1) })
 	}()
 
 	time.Sleep(100 * time.Millisecond) // let IDLE start
@@ -53,7 +53,7 @@ func TestIdleReportsNewMail(t *testing.T) {
 
 func TestIdleUnsupportedWithoutCapability(t *testing.T) {
 	w := NewWatcher()
-	if err := w.Idle(context.Background(), "INBOX", func() {}); !errors.Is(err, ErrIdleUnsupported) {
+	if err := w.Idle(context.Background(), "INBOX", nil, func() {}); !errors.Is(err, ErrIdleUnsupported) {
 		t.Fatalf("unconnected watcher: err = %v, want ErrIdleUnsupported", err)
 	}
 	if hasIdle(nil) {
@@ -69,7 +69,7 @@ func TestIdleContextEndsWithoutLeak(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- w.Idle(ctx, "INBOX", func() {}) }()
+	go func() { done <- w.Idle(ctx, "INBOX", nil, func() {}) }()
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	select {

@@ -19,6 +19,8 @@ const (
 	DefaultWatchInterval = 120 * time.Second // reconcile period while IDLE is active
 	DefaultPollInterval  = 30 * time.Second  // reconcile period when IDLE is unavailable
 	DefaultDebounce      = 500 * time.Millisecond
+	DefaultFlagSweep     = 15 * time.Minute // All Mail flag resync
+	DefaultIdleStable    = 2 * time.Minute  // session length that resets the backoff
 	maxWatchBackoff      = 5 * time.Minute
 )
 
@@ -94,21 +96,34 @@ func (s *Syncer) Check(ctx context.Context) (Changes, error) {
 
 // mailboxChanged compares one mailbox's STATUS with its cached state. A zero
 // server UIDVALIDITY is unknown, so it never counts as a change.
+//
+// UIDNEXT is compared with the value stored at the last sync, not with the
+// highest cached UID. A newest message that was expunged keeps UIDNEXT above
+// the highest UID, so comparing with the highest UID would resync that mailbox
+// on every check.
+//
+// The unseen count is not compared for All Mail. Reading a message there moves
+// the count of every mailbox that holds it, and All Mail's count is the largest
+// listing of all. Its flags are refreshed by the periodic flag sweep instead,
+// and by IDLE on INBOX.
 func mailboxChanged(c store.MailboxState, st mail.MailboxStatus, cachedMessages int) bool {
 	switch {
 	case c.LastSync.IsZero():
 		return true
 	case st.UIDValidity != 0 && st.UIDValidity != c.UIDValidity:
 		return true
-	case st.UIDNext > 0 && st.UIDNext-1 > c.HighestUID:
+	case st.UIDNext != 0 && st.UIDNext != c.UIDNext:
 		return true
 	case st.Messages != uint32(cachedMessages):
 		return true
-	case st.Unseen != c.Unseen:
+	case c.Name != allMailName && st.Unseen != c.Unseen:
 		return true
 	}
 	return false
 }
+
+// allMailName is Proton's All Mail mailbox.
+const allMailName = "All Mail"
 
 // RunChanged syncs only the named mailboxes, then the bodies that are missing.
 // It is the incremental path: the planner only fetches UIDs that are not cached,
@@ -169,30 +184,42 @@ type WatchOptions struct {
 	// Backoff is the first delay after a failed check or IDLE connection. It
 	// doubles up to five minutes.
 	Backoff time.Duration
+	// FlagSweepInterval is how often All Mail is resynced for flag changes. It
+	// is slow on purpose: All Mail is the largest mailbox, and IDLE on INBOX
+	// covers the flags that matter most.
+	FlagSweepInterval time.Duration
+	// IdleStableAfter is how long an IDLE session must last before its failure
+	// resets the backoff. A session that drops at once keeps the backoff growing.
+	IdleStableAfter time.Duration
 	// OnChanged receives the names of the mailboxes that were synced after a
 	// check found changes (all mailboxes after a Full run).
 	OnChanged func(mailboxes []string)
 }
 
 // Watcher keeps the cache current after the first sync. It runs two things:
-//   - an IDLE connection on All Mail (or INBOX when All Mail is hidden) that
-//     triggers a check on each unsolicited update;
-//   - a reconcile timer that checks every tracked mailbox with STATUS.
+//   - an IDLE connection on INBOX that triggers a check on each unsolicited
+//     update. All Mail changes are found by the reconcile timer, not by IDLE,
+//     because a SELECT of All Mail is expensive;
+//   - a reconcile timer that checks every tracked mailbox with STATUS, and a
+//     slower flag sweep of All Mail.
 //
-// Checks run on the Syncer's poll connection. Changed mailboxes are synced
-// incrementally. Auth failures and certificate errors stop the watcher, because
-// retrying them cannot succeed and each attempt counts toward Bridge's login
-// limit. Transport failures back off and retry.
+// Checks run on the Syncer's connection, which the sync leaves open for the
+// watcher to reuse. Changed mailboxes are synced incrementally. An auth failure
+// is latched (see AuthLatch) and stops the watcher: neither the poll nor the
+// IDLE connection tries again with the same credentials. Transport failures back
+// off and retry.
 type Watcher struct {
 	syn         *Syncer
 	idler       mail.Watcher // nil: no IDLE (the client does not support it)
 	connectIdle ConnectFunc
 	opts        WatchOptions
 	sleep       func(context.Context, time.Duration) error
+	kick        chan struct{} // one pending check request; see Kick
 
 	mu          sync.Mutex
-	idle        bool // IDLE is running on the idle connection
+	idle        bool // IDLE has started and is watching
 	lastChecked time.Time
+	lastSweep   time.Time
 }
 
 // NewWatcher returns a Watcher. idler may be nil. connectIdle connects it (with
@@ -210,10 +237,28 @@ func NewWatcher(syn *Syncer, idler mail.Watcher, connectIdle ConnectFunc, opts W
 	if opts.Backoff <= 0 {
 		opts.Backoff = DefaultBackoff
 	}
-	return &Watcher{syn: syn, idler: idler, connectIdle: connectIdle, opts: opts, sleep: defaultSleep}
+	if opts.FlagSweepInterval <= 0 {
+		opts.FlagSweepInterval = DefaultFlagSweep
+	}
+	if opts.IdleStableAfter <= 0 {
+		opts.IdleStableAfter = DefaultIdleStable
+	}
+	return &Watcher{syn: syn, idler: idler, connectIdle: connectIdle, opts: opts,
+		sleep: defaultSleep, kick: make(chan struct{}, 1)}
 }
 
-// IdleActive reports whether the IDLE connection is currently watching.
+// Kick asks for a check as soon as the debounce allows. It does not block, and
+// a request made while one is already pending is merged with it. The services
+// layer calls it when the user asks to sync while the watcher is running.
+func (w *Watcher) Kick() {
+	select {
+	case w.kick <- struct{}{}:
+	default:
+	}
+}
+
+// IdleActive reports whether the IDLE connection is currently watching. It is
+// true only after IDLE has started, not while the connection is being made.
 func (w *Watcher) IdleActive() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -245,13 +290,12 @@ func (w *Watcher) interval() time.Duration {
 func (w *Watcher) Run(ctx context.Context) error {
 	wctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
-	kick := make(chan struct{}, 1)
 	fatalCh := make(chan error, 1)
 	if w.idler != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w.idleLoop(wctx, kick, fatalCh)
+			w.idleLoop(wctx, fatalCh)
 		}()
 	}
 	defer func() {
@@ -259,6 +303,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 		wg.Wait()
 	}()
 
+	w.mu.Lock()
+	w.lastSweep = time.Now()
+	w.mu.Unlock()
 	backoff := w.opts.Backoff
 	for {
 		timer := time.NewTimer(w.interval())
@@ -270,22 +317,31 @@ func (w *Watcher) Run(ctx context.Context) error {
 			timer.Stop()
 			return err
 		case <-timer.C:
-		case <-kick:
+		case <-w.kick:
 			timer.Stop()
 		}
 		if err := w.sleep(wctx, w.opts.Debounce); err != nil {
 			return ctx.Err()
 		}
-		drain(kick)
+		drain(w.kick)
 
 		changes, err := w.syn.Check(wctx)
 		w.mu.Lock()
 		w.lastChecked = time.Now()
+		sweep := time.Since(w.lastSweep) >= w.opts.FlagSweepInterval
 		w.mu.Unlock()
+		if err == nil && sweep {
+			changes = w.withAllMail(ctx, changes)
+		}
 		if err == nil {
 			err = w.apply(wctx, changes)
 		}
 		if err == nil {
+			if sweep {
+				w.mu.Lock()
+				w.lastSweep = time.Now()
+				w.mu.Unlock()
+			}
 			backoff = w.opts.Backoff
 			continue
 		}
@@ -301,6 +357,20 @@ func (w *Watcher) Run(ctx context.Context) error {
 		}
 		backoff = min(backoff*2, maxWatchBackoff)
 	}
+}
+
+// withAllMail adds All Mail to a set of changes, for the flag sweep. It does
+// nothing after a full run (which covers every mailbox) or when All Mail is not
+// cached (for example when Bridge hides it).
+func (w *Watcher) withAllMail(ctx context.Context, changes Changes) Changes {
+	if changes.Full || slices.Contains(changes.Mailboxes, allMailName) {
+		return changes
+	}
+	names := w.allNames(ctx)
+	if slices.Contains(names, allMailName) {
+		changes.Mailboxes = append(changes.Mailboxes, allMailName)
+	}
+	return changes
 }
 
 // apply syncs what a check found and reports it. A partial run counts as
@@ -342,14 +412,17 @@ func (w *Watcher) allNames(ctx context.Context) []string {
 }
 
 // idleLoop keeps the IDLE connection running. It reconnects after transport
-// failures with backoff. It stops for good when IDLE is not offered (the poll
-// timer then runs faster) and reports permanent errors through fatal.
-func (w *Watcher) idleLoop(ctx context.Context, kick chan<- struct{}, fatal chan<- error) {
+// failures with backoff. A session that lasted at least IdleStableAfter resets
+// the backoff, so one long session does not leave the next retry at its
+// maximum. It stops for good when IDLE is not offered (the poll timer then runs
+// faster) and reports permanent errors through fatal.
+func (w *Watcher) idleLoop(ctx context.Context, fatal chan<- error) {
 	defer func() { _ = w.idler.Close() }()
 	defer w.setIdle(false)
 	backoff := w.opts.Backoff
 	for {
-		err := w.idleOnce(ctx, kick)
+		started := time.Now()
+		err := w.idleOnce(ctx)
 		w.setIdle(false)
 		if ctx.Err() != nil {
 			return
@@ -364,6 +437,9 @@ func (w *Watcher) idleLoop(ctx context.Context, kick chan<- struct{}, fatal chan
 			}
 			return
 		}
+		if time.Since(started) >= w.opts.IdleStableAfter {
+			backoff = w.opts.Backoff
+		}
 		if serr := w.sleep(ctx, backoff); serr != nil {
 			return
 		}
@@ -371,36 +447,25 @@ func (w *Watcher) idleLoop(ctx context.Context, kick chan<- struct{}, fatal chan
 	}
 }
 
-// idleOnce connects the IDLE connection, then idles on All Mail (INBOX when All
-// Mail is absent) until the connection ends.
-func (w *Watcher) idleOnce(ctx context.Context, kick chan<- struct{}) error {
+// idleOnce connects the IDLE connection, then idles on INBOX until the
+// connection ends. The auth latch is checked first, so a refused login is not
+// tried again, and a refused login trips it. Watching is reported only once IDLE
+// has started.
+func (w *Watcher) idleOnce(ctx context.Context) error {
+	auth := w.syn.opts.Auth
+	if err := auth.Check(w.syn.opts.CredsKey); err != nil {
+		return err
+	}
 	if err := w.connectIdle(ctx); err != nil {
+		auth.Trip(w.syn.opts.CredsKey, err)
 		return err
 	}
 	if !slices.Contains(w.idler.Capabilities(), "IDLE") {
 		return mail.ErrIdleUnsupported
 	}
-	mailbox := w.idleMailbox(ctx)
-	w.setIdle(true)
-	return w.idler.Idle(ctx, mailbox, func() {
-		select {
-		case kick <- struct{}{}:
-		default: // a check is already pending
-		}
-	})
-}
-
-// idleMailbox returns All Mail when the cache has it, otherwise INBOX.
-func (w *Watcher) idleMailbox(ctx context.Context) string {
-	states, err := w.syn.store.GetSyncState(ctx, w.syn.opts.Account)
-	if err == nil {
-		for _, s := range states {
-			if s.Name == "All Mail" {
-				return "All Mail"
-			}
-		}
-	}
-	return "INBOX"
+	return w.idler.Idle(ctx, "INBOX",
+		func() { w.setIdle(true) },
+		func() { w.Kick() })
 }
 
 // drain empties a one-slot signal channel, so a burst becomes one check.

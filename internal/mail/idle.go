@@ -24,11 +24,12 @@ type Watcher interface {
 	Connect(ctx context.Context, acct config.BridgeAccount, password string) error
 	// Capabilities returns the server capabilities from the last login.
 	Capabilities() []string
-	// Idle watches mailbox until ctx ends or the connection fails. onChange is
-	// called for each unsolicited update (new mail, expunge, flags). It runs on
-	// the read loop, so it must not block. It returns ErrIdleUnsupported when
-	// IDLE is not offered.
-	Idle(ctx context.Context, mailbox string, onChange func()) error
+	// Idle watches mailbox until ctx ends or the connection fails. started is
+	// called once IDLE has actually begun, so a caller never reports "watching"
+	// for a session that failed to start. onChange is called for each
+	// unsolicited update (new mail, expunge, flags). It runs on the read loop, so
+	// it must not block. It returns ErrIdleUnsupported when IDLE is not offered.
+	Idle(ctx context.Context, mailbox string, started func(), onChange func()) error
 	// Close ends any running Idle and closes the connection.
 	Close() error
 }
@@ -52,7 +53,7 @@ func (c *imapClient) unilateral() *imapclient.UnilateralDataHandler {
 // Idle implements Watcher. It selects mailbox read-only, starts IDLE, and calls
 // onChange for each unsolicited update until ctx ends or the server ends IDLE
 // with an error. go-imap re-issues IDLE by itself, before the server's timeout.
-func (c *imapClient) Idle(ctx context.Context, mailbox string, onChange func()) error {
+func (c *imapClient) Idle(ctx context.Context, mailbox string, started func(), onChange func()) error {
 	if !slices.Contains(c.Capabilities(), "IDLE") {
 		return ErrIdleUnsupported
 	}
@@ -71,6 +72,9 @@ func (c *imapClient) Idle(ctx context.Context, mailbox string, onChange func()) 
 	cmd, err := cl.Idle()
 	if err != nil {
 		return opErr(ctx, fmt.Errorf("start IDLE on %s: %w", mailbox, err))
+	}
+	if started != nil {
+		started()
 	}
 	finished := make(chan struct{})
 	go func() {
