@@ -1,4 +1,5 @@
 import * as api from "../api";
+import { DECLINED_NOTICE, isEnableDeclined, isKeyReentry } from "./errors";
 
 export type TestState =
   { busy: true } | { busy: false; result: api.ProviderTest };
@@ -10,6 +11,8 @@ class LLM {
   tests = $state<Record<string, TestState>>({});
   /** Last action error (default, delete, enable), shown above the list. */
   actionError = $state("");
+  /** A calm note, not an error (for example the OS confirmation was declined). */
+  notice = $state("");
 
   async load(): Promise<void> {
     try {
@@ -66,10 +69,14 @@ class LLM {
 
   private async act(fn: () => Promise<void>): Promise<void> {
     this.actionError = "";
+    this.notice = "";
     try {
       await fn();
-    } catch {
-      this.actionError = "That didn't work. Nothing was changed.";
+    } catch (e) {
+      if (isEnableDeclined(e)) this.notice = DECLINED_NOTICE;
+      else if (isKeyReentry(e))
+        this.actionError = "Edit the provider and re-enter the API key.";
+      else this.actionError = "That didn't work. Nothing was changed.";
     }
     await this.load();
   }

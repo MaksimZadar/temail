@@ -5,6 +5,10 @@ export const MAX_MODEL = 200;
 export const MAX_KEY = 4096;
 export const MAX_CONTEXT = 10_000_000;
 
+/** How the Go side compares names for environment variables: case and - vs _ folded. */
+export const foldName = (n: string): string =>
+  n.trim().toUpperCase().replace(/-/g, "_");
+
 export interface FormValues {
   name: string;
   baseURL: string;
@@ -33,6 +37,11 @@ export function validate(v: FormValues): FieldErrors {
         "Use letters, digits, - or _ (up to 64), starting with a letter or digit.";
     else if (v.existing.some((n) => n.toLowerCase() === name.toLowerCase()))
       e.name = "A provider with this name already exists.";
+    else {
+      const twin = v.existing.find((n) => foldName(n) === foldName(name));
+      if (twin)
+        e.name = `Too close to “${twin}”. Names that differ only by capitals, - or _ would share one key setting. Pick a different name.`;
+    }
   }
   const url = v.baseURL.trim();
   if (!url) e.baseURL = "Enter the address of the service.";
@@ -41,6 +50,14 @@ export function validate(v: FormValues): FieldErrors {
       const u = new URL(url);
       if (u.protocol !== "http:" && u.protocol !== "https:")
         e.baseURL = "The address must start with http:// or https://.";
+      else if (u.username || u.password)
+        e.baseURL =
+          "Remove the username and password from the address. Enter the key in the API key field instead.";
+      else if (url.includes("?"))
+        e.baseURL =
+          "Remove the ? and everything after it. The address can't have a query.";
+      else if (url.includes("#"))
+        e.baseURL = "Remove the # and everything after it.";
       else if (u.protocol === "http:" && kindFor(url) === "cloud")
         e.baseURL = "Use https:// for services outside this computer.";
     } catch {

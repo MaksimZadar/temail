@@ -240,10 +240,15 @@
         Turn this provider on
         <small>
           Cloud providers receive email content when you use AI features.
-          Nothing is sent until you turn it on.
+          Nothing is sent until you turn it on. Your system will ask you to
+          confirm.
         </small>
       </span>
     </label>
+  {/if}
+
+  {#if form.notice}
+    <p class="notice" role="status">{form.notice}</p>
   {/if}
 
   <ErrorBanner error={banner} busy={form.busy} onrecover={recover} />
@@ -358,6 +363,13 @@
   .check > span {
     display: grid;
     font-weight: 600;
+  }
+  .notice {
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    border-left: 3px solid var(--warn);
+    background: var(--bg-pane);
+    border-radius: 4px;
   }
   .actions {
     display: flex;

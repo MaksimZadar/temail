@@ -227,10 +227,12 @@ describe("confirmations", () => {
       await screen.findByRole("switch", { name: "Use openrouter" }),
     );
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent(/receive email content/i);
+    expect(dialog).toHaveTextContent(/Review what.s shared/);
+    expect(dialog).toHaveTextContent(/receives email content/i);
+    expect(dialog).toHaveTextContent(/Your system will ask you to confirm/);
     expect(m.saveProvider).not.toHaveBeenCalled();
     await fireEvent.click(
-      within(dialog).getByRole("button", { name: "Turn on" }),
+      within(dialog).getByRole("button", { name: "Continue" }),
     );
     await waitFor(() =>
       expect(m.saveProvider).toHaveBeenCalledWith(
@@ -358,7 +360,7 @@ describe("the form", () => {
     const dialog = await screen.findByRole("alertdialog");
     expect(m.saveProvider).not.toHaveBeenCalled();
     await fireEvent.click(
-      within(dialog).getByRole("button", { name: /Save and turn on/ }),
+      within(dialog).getByRole("button", { name: /Save and continue/ }),
     );
     await waitFor(() =>
       expect(m.saveProvider).toHaveBeenCalledWith(
@@ -449,5 +451,146 @@ describe("the form", () => {
       await screen.findByRole("button", { name: "Save and test" }),
     );
     await waitFor(() => expect(m.testProvider).toHaveBeenCalledWith("ollama"));
+  });
+
+  it("keeps the form and switches it off when the system dialog is declined", async () => {
+    m.saveProvider.mockRejectedValueOnce(
+      new Error(
+        "enabling a cloud LLM provider was not confirmed; nothing was saved",
+      ),
+    );
+    await openSettings([]);
+    await fireEvent.click(
+      await screen.findByRole("button", { name: /OpenRouter/ }),
+    );
+    await fireEvent.input(await screen.findByLabelText("API key"), {
+      target: { value: "sk-abc" },
+    });
+    await fireEvent.click(
+      screen.getByRole("checkbox", { name: /Turn this provider on/ }),
+    );
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await fireEvent.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", {
+        name: /Save and continue/,
+      }),
+    );
+    expect(
+      await screen.findByText("The provider stays off. Nothing was saved."),
+    ).toBeInTheDocument();
+    // Still on the form, switch is off again, key not retained, no error banner.
+    expect(
+      screen.getByRole("heading", { name: "Add a provider" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: /Turn this provider on/ }),
+    ).not.toBeChecked();
+    expect(screen.queryByDisplayValue("sk-abc")).toBeNull();
+    expect(screen.queryByText("Couldn't save the provider")).toBeNull();
+  });
+
+  it("shows the same calm message when the card switch is declined", async () => {
+    m.saveProvider.mockRejectedValueOnce(
+      new Error(
+        "enabling a cloud LLM provider was not confirmed; nothing was saved",
+      ),
+    );
+    await openSettings([cloud()]);
+    await fireEvent.click(
+      await screen.findByRole("switch", { name: "Use openrouter" }),
+    );
+    await fireEvent.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", {
+        name: "Continue",
+      }),
+    );
+    expect(
+      await screen.findByText("The provider stays off. Nothing was saved."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "Use openrouter" }),
+    ).not.toBeChecked();
+  });
+
+  it("asks for confirmation when a local provider is pointed at the cloud while on", async () => {
+    await openSettings([prov()]);
+    await fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await fireEvent.input(await screen.findByLabelText(/Address/), {
+      target: { value: "https://api.example.com/v1" },
+    });
+    await fireEvent.input(screen.getByLabelText("API key"), {
+      target: { value: "k" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent(
+      /Review what.s shared/,
+    );
+    expect(m.saveProvider).not.toHaveBeenCalled();
+  });
+
+  it("explains a key that already exists when creating a provider", async () => {
+    m.saveProvider.mockRejectedValueOnce(
+      new Error(
+        "an API key exists that was not approved for this base URL; enter the API key again",
+      ),
+    );
+    await openSettings([]);
+    await fireEvent.click(
+      await screen.findByRole("button", { name: /Ollama/ }),
+    );
+    await fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Enter the API key")).toBeInTheDocument();
+    expect(
+      screen.getByText(/already stored under this name/),
+    ).toBeInTheDocument();
+  });
+
+  it("asks to re-enter a key saved before the address lock", async () => {
+    m.saveProvider.mockRejectedValueOnce(
+      new Error(
+        "an API key exists that was not approved for this base URL; enter the API key again",
+      ),
+    );
+    await openSettings([cloud({ enabled: true })]);
+    await fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await fireEvent.input(await screen.findByLabelText("Model"), {
+      target: { value: "x/z" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(
+      await screen.findByText(
+        "Please re-enter the key once so temail can lock it to this address.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("hints at re-entering the key when a keyed provider's test fails with 'other'", async () => {
+    m.testProvider.mockResolvedValue({
+      ok: false,
+      category: "other",
+      message: "The provider request failed.",
+    });
+    await openSettings([cloud({ enabled: true })]);
+    await fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    expect(
+      await screen.findByText(/re-enter the key once/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/redirected somewhere else/)).toBeInTheDocument();
+  });
+
+  it("explains re-entry when listing models needs it", async () => {
+    m.listModels.mockRejectedValue(
+      new Error(
+        "an API key exists that was not approved for this base URL; enter the API key again",
+      ),
+    );
+    await openSettings([cloud({ enabled: true })]);
+    await fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await fireEvent.click(
+      await screen.findByRole("button", { name: "Load models" }),
+    );
+    expect(
+      await screen.findByText(/re-enter the key once/),
+    ).toBeInTheDocument();
   });
 });
