@@ -130,7 +130,7 @@ func Complete[T any](ctx context.Context, c *Client, req Request, s Schema[T]) (
 	if m == modePrompt {
 		system = joinLines(system, "Reply with only one JSON object that matches this JSON Schema. Do not add any other text.\n"+string(schemaJSON))
 	}
-	if err := c.checkSize(system, req.User, schemaJSON); err != nil {
+	if err := c.checkSize(system, req.User, string(schemaJSON)); err != nil {
 		return zero, err
 	}
 
@@ -144,7 +144,12 @@ func Complete[T any](ctx context.Context, c *Client, req Request, s Schema[T]) (
 	for attempt := 0; attempt < 2; attempt++ {
 		send := msgs
 		if attempt == 1 {
-			correction := fmt.Sprintf("Your previous reply was not valid: %v. Reply again with only one JSON object that matches the schema.", reason)
+			// The decoder's text goes into the prompt. Keep it short, and count it
+			// against the context limit like the rest of the request.
+			correction := fmt.Sprintf("Your previous reply was not valid: %s. Reply again with only one JSON object that matches the schema.", truncate(reason.Error(), maxReasonChars))
+			if err := c.checkSize(system, req.User, string(schemaJSON), correction); err != nil {
+				return zero, err
+			}
 			send = append(slices.Clone(msgs), openai.UserMessage(correction))
 		}
 		raw, err := c.send(ctx, m, s.Name, s.Description, s.JSONSchema, send)
@@ -157,7 +162,8 @@ func Complete[T any](ctx context.Context, c *Client, req Request, s Schema[T]) (
 		}
 		reason = derr
 	}
-	return zero, &Error{Category: CategoryInvalidOutput, cause: fmt.Errorf("%w: %v", ErrInvalidOutput, reason)}
+	// The decoder's text is not kept: it could echo the reply. The sentinel is.
+	return zero, &Error{Category: CategoryInvalidOutput, cause: ErrInvalidOutput}
 }
 
 // send makes one chat-completions request and returns the candidate reply bytes.
@@ -220,17 +226,34 @@ func (c *Client) send(ctx context.Context, m mode, name, desc string, schema map
 	return []byte(msg.Content), nil
 }
 
+// maxReasonChars bounds the decoder error text that is shown to the model.
+const maxReasonChars = 300
+
 // checkSize refuses a request whose rough token estimate exceeds MaxContext.
-func (c *Client) checkSize(system, user string, schemaJSON []byte) error {
+// Every part that is sent counts: the system and user text, the schema, and on
+// the retry, the correction message.
+func (c *Client) checkSize(parts ...string) error {
 	limit := c.p.Capabilities.MaxContext
 	if limit <= 0 {
 		return nil
 	}
-	chars := len(system) + len(user) + len(schemaJSON)
+	chars := 0
+	for _, p := range parts {
+		chars += len(p)
+	}
 	if chars/approxCharsPerToken > limit {
 		return ErrTooLarge
 	}
 	return nil
+}
+
+// truncate shortens s to at most n runes.
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 func joinLines(a, b string) string {
