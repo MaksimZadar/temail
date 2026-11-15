@@ -23,7 +23,7 @@ adding a method. The rules are:
 | Service | Bound methods |
 |---------|---------------|
 | `SetupService` | `GetStatus(ctx)`, `SaveAccount(ctx, host, imapPort, smtpPort, tlsMode, username, password)`, `ProbeCert(ctx)`, `TrustCert(ctx, fingerprint, replace)`, `TestConnection(ctx)` |
-| `MailService` | `ListMailboxes(ctx)`, `ListMessages(ctx, mailbox, cursor, limit)`, `GetMessage(ctx, mailbox, uidValidity, uid)`, `GetAttachment(ctx, mailbox, uidValidity, uid, partID)` |
+| `MailService` | `CacheInfo(ctx)`, `ListMailboxes(ctx)`, `ListMessages(ctx, mailbox, cursor, limit)`, `GetMessage(ctx, mailbox, uidValidity, uid)`, `GetAttachment(ctx, mailbox, uidValidity, uid, partID)` |
 | `SyncService` | `Start()`, `Stop()`, `Status()` |
 
 `ctx` is the Wails call context. It is not part of the JavaScript signature.
@@ -94,6 +94,15 @@ running, and its result is cached for 30 s.
 
 ### MailService
 
+- `CacheInfo(ctx)` returns `CacheInfoDTO{bytes, messages, bodies}` (camelCase
+  JSON). It reads through `store.CacheStats`: `bytes` is `os.Stat` of the
+  database, `-wal` and `-shm` (a missing file counts 0), and the counts are
+  `COUNT(*)` with an equality filter on `account`. Both `messages` and `bodies`
+  have a primary key that starts with `account`, so SQLite counts from that index
+  without reading rows. Measured on this machine at 50k messages and 25k bodies:
+  4.3 ms best case. Nothing is cached, so no counter can drift. It never connects
+  to Bridge. With no configured account, the counts are 0 and the bytes are still
+  reported.
 - `ListMailboxes()` and `ListMessages(mailbox, cursor, limit)` read only the
   cache. They never connect. `limit` defaults to 50 and is capped at
   `store.MaxListLimit`. A full page returns a `next` cursor, and a short page

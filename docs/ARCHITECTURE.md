@@ -152,6 +152,7 @@ The bound methods are:
 | `SetupService` | `TrustCert(fingerprint, replace)` | Pins the fingerprint only if a fresh probe gives the same value. If the account already has a different pin, `replace` must be true (else `already_pinned`). The config is re-read after the probe; a changed host, port, TLS mode or ID refuses the pin. Restarts sync |
 | `SetupService` | `TestConnection()` | Logs in and out (read-only). Returns a category: `ok`, `not_configured`, `no_password`, `keyring_unavailable`, `bridge_unreachable`, `untrusted_cert`, `cert_mismatch`, `auth_failed`, `invalid_config` or `other` |
 | `MailService` | `ListMailboxes()` | Mailbox list from the cache, with counts and last sync time |
+| `MailService` | `CacheInfo()` | Local cache size for the footer: `{bytes, messages, bodies}` as `CacheInfoDTO`. `bytes` is the size on disk of the database plus its `-wal` and `-shm` files. `messages` and `bodies` count the configured account's rows. Read-only, no connection to Bridge, cheap enough to poll during a sync |
 | `MailService` | `ListMessages(mailbox, cursor, limit)` | One page of cached headers, newest first. Keyset cursor |
 | `MailService` | `GetMessage(mailbox, uidValidity, uid)` | Cached message (text, sanitised HTML, attachment metadata). Fetched from Bridge and cached if the body is missing |
 | `MailService` | `GetAttachment(mailbox, uidValidity, uid, partID)` | Attachment bytes, fetched on demand. Limited to 10 MiB. Returned to the frontend, never written to disk |

@@ -23,7 +23,8 @@ import (
 
 // sqliteStore implements Store on a SQLite file.
 type sqliteStore struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // Open opens (creating if needed) the cache at path and applies pending
@@ -68,7 +69,7 @@ func Open(path string) (Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cache %s: %w", path, err)
 	}
-	s := &sqliteStore{db: db}
+	s := &sqliteStore{db: db, path: path}
 	if err := retryBusy(ctx, func() error { return s.migrate(ctx) }); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -813,6 +814,32 @@ func (s *sqliteStore) Counts(ctx context.Context, account string) ([]MailboxCoun
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// CacheStats implements Store. The row counts are COUNT(*) with an equality
+// filter on account. messages and bodies both have a primary key that starts
+// with account, so SQLite counts from that index without reading table rows.
+// The file sizes come from os.Stat, which is a few system calls. Callers may
+// poll this during a sync.
+func (s *sqliteStore) CacheStats(ctx context.Context, account string) (CacheStats, error) {
+	var out CacheStats
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE account = ?`, account).Scan(&out.Messages); err != nil {
+		return CacheStats{}, fmt.Errorf("count messages: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM bodies WHERE account = ?`, account).Scan(&out.Bodies); err != nil {
+		return CacheStats{}, fmt.Errorf("count bodies: %w", err)
+	}
+	for _, name := range []string{s.path, s.path + "-wal", s.path + "-shm"} {
+		fi, err := os.Stat(name)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return CacheStats{}, fmt.Errorf("stat cache file: %w", err)
+		}
+		out.Bytes += fi.Size()
+	}
+	return out, nil
 }
 
 // NormalizeFlags returns a sorted copy with duplicates removed, so the same

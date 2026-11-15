@@ -2,11 +2,13 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MaksimZadar/temail/internal/config"
 	"github.com/MaksimZadar/temail/internal/mail"
 	"github.com/MaksimZadar/temail/internal/model"
 	"github.com/MaksimZadar/temail/internal/store"
@@ -277,5 +279,58 @@ func TestGetAttachmentFetchErrorIsWrapped(t *testing.T) {
 	fx.client.attachErr = boom
 	if _, err := fx.svc.GetAttachment(context.Background(), "INBOX", testEpoch, 3, "2"); !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCacheInfoReadsStatsWithoutConnecting(t *testing.T) {
+	fx := newMailFixture(t)
+	fx.st.stats = store.CacheStats{Bytes: 4096, Messages: 12, Bodies: 5}
+
+	got, err := fx.svc.CacheInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (CacheInfoDTO{Bytes: 4096, Messages: 12, Bodies: 5}) {
+		t.Fatalf("got %+v", got)
+	}
+	if fx.st.statsAccount != "main" {
+		t.Fatalf("stats read for %q, want the configured account", fx.st.statsAccount)
+	}
+	if fx.f.count() != 0 {
+		t.Fatal("CacheInfo must not connect to Bridge")
+	}
+}
+
+func TestCacheInfoWithoutAccountKeepsFileSize(t *testing.T) {
+	st := newFakeStore()
+	st.stats = store.CacheStats{Bytes: 100}
+	f := &clientFactory{c: &fakeClient{}}
+	svc := NewMailService(st, newFakeConfig(config.Default()), newFakeSecrets(), f.new)
+	t.Cleanup(func() { _ = svc.ServiceShutdown() })
+
+	got, err := svc.CacheInfo(context.Background())
+	if err != nil {
+		t.Fatalf("no account must not be an error: %v", err)
+	}
+	if got.Bytes != 100 || got.Messages != 0 || st.statsAccount != "" {
+		t.Fatalf("got %+v, account %q", got, st.statsAccount)
+	}
+}
+
+func TestCacheInfoJSONIsCamelCaseAndSecretFree(t *testing.T) {
+	raw, err := json.Marshal(CacheInfoDTO{Bytes: 1, Messages: 2, Bodies: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"bytes":1,"messages":2,"bodies":3}` {
+		t.Fatalf("json = %s", raw)
+	}
+}
+
+func TestCacheInfoRefusedAfterShutdown(t *testing.T) {
+	fx := newMailFixture(t)
+	_ = fx.svc.ServiceShutdown()
+	if _, err := fx.svc.CacheInfo(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
 	}
 }

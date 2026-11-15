@@ -17,7 +17,7 @@ var wantBound = map[string][]string{
 		"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert",
 	},
 	"MailService": {
-		"GetAttachment", "GetMessage", "ListMailboxes", "ListMessages",
+		"CacheInfo", "GetAttachment", "GetMessage", "ListMailboxes", "ListMessages",
 	},
 	"SyncService": {
 		"Start", "Status", "Stop",
@@ -112,7 +112,7 @@ func checkNoSecretFields(t *testing.T, where string, typ reflect.Type, seen map[
 // JavaScript; it ends when the call is cancelled or the app shuts down.
 var wailsCtxMethods = map[string][]string{
 	"SetupService": {"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert"},
-	"MailService":  {"GetAttachment", "GetMessage", "ListMailboxes", "ListMessages"},
+	"MailService":  {"CacheInfo", "GetAttachment", "GetMessage", "ListMailboxes", "ListMessages"},
 	"SyncService":  {},
 }
 

@@ -344,6 +344,9 @@ type fakeStore struct {
 	listed    []model.MessageHeader
 	setBodies int
 	lastOpts  store.ListOptions
+	// stats is returned by CacheStats; statsAccount records the account asked for.
+	stats        store.CacheStats
+	statsAccount string
 }
 
 func newFakeStore() *fakeStore {
@@ -360,6 +363,13 @@ func (f *fakeStore) Counts(context.Context, string) ([]store.MailboxCounts, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]store.MailboxCounts(nil), f.counts...), nil
+}
+
+func (f *fakeStore) CacheStats(_ context.Context, account string) (store.CacheStats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statsAccount = account
+	return f.stats, nil
 }
 
 func (f *fakeStore) ListMessages(_ context.Context, _, _ string, opts store.ListOptions) ([]model.MessageHeader, error) {
