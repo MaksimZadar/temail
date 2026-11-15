@@ -2,7 +2,7 @@
 // popup are all generated from it. Key tokens: a printable key as typed
 // ("j", "G", "?"), or "C-d" for Ctrl+d, "Enter", "Escape", "Tab".
 
-export type Context = "global" | "wizard" | "main";
+export type Context = "global" | "wizard" | "main" | "settings";
 export type Phase = 2 | 3 | 4 | 5;
 
 export interface Binding {
@@ -59,6 +59,7 @@ export const keymap: Binding[] = [
   b("g a", "goto.archive", "main", 2, "Go to", "Archive"),
   b("g j", "goto.spam", "main", 2, "Go to", "Spam"),
   b("g l", "goto.pick", "main", 2, "Go to", "Pick a folder or label"),
+  b("g ,", "settings.open", "main", 2, "Go to", "Settings"),
   b("g r", "sync.refresh", "main", 2, "Go to", "Refresh"),
 
   // Message view

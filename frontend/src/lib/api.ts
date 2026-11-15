@@ -2,6 +2,8 @@
 // replace this whole module, so nothing else imports the bindings directly.
 import { Browser, Events } from "@wailsio/runtime";
 import {
+  LLMService,
+  LLMProviderInput,
   MailService,
   SetupService,
   SyncService,
@@ -97,6 +99,36 @@ export interface CacheInfo {
   messages: number;
   bodies: number;
 }
+export interface LLMCapabilities {
+  structuredOutput: boolean;
+  tools: boolean;
+  maxContext: number;
+}
+export interface LLMProvider {
+  name: string;
+  baseURL: string;
+  model: string;
+  kind: "local" | "cloud";
+  enabled: boolean;
+  capabilities: LLMCapabilities;
+  isDefault: boolean;
+  hasKey: boolean;
+}
+/** What SaveProvider takes. apiKey is write-only; empty keeps the stored key. */
+export interface LLMProviderIn {
+  name: string;
+  baseURL: string;
+  model: string;
+  kind: "local" | "cloud";
+  enabled: boolean;
+  capabilities: LLMCapabilities;
+  apiKey: string;
+}
+export interface ProviderTest {
+  ok: boolean;
+  category: string;
+  message: string;
+}
 export interface AttachmentData {
   filename: string;
   contentType: string;
@@ -173,6 +205,19 @@ export const getAttachment = (
   ) as unknown as Promise<AttachmentData>;
 export const cacheInfo = (): Promise<CacheInfo> =>
   MailService.CacheInfo() as unknown as Promise<CacheInfo>;
+export const listProviders = (): Promise<LLMProvider[]> =>
+  LLMService.ListProviders() as unknown as Promise<LLMProvider[]>;
+export const saveProvider = (input: LLMProviderIn): Promise<void> =>
+  LLMService.SaveProvider(new LLMProviderInput(input as never));
+export const deleteProvider = (name: string): Promise<void> =>
+  LLMService.DeleteProvider(name);
+/** An empty name clears the default. */
+export const setDefaultProvider = (name: string): Promise<void> =>
+  LLMService.SetDefaultProvider(name);
+export const testProvider = (name: string): Promise<ProviderTest> =>
+  LLMService.TestProvider(name) as unknown as Promise<ProviderTest>;
+export const listModels = (name: string): Promise<string[]> =>
+  LLMService.ListModels(name) as unknown as Promise<string[]>;
 /** Open a URL in the system browser. */
 export const openUrl = (url: string): Promise<void> => Browser.OpenURL(url);
 export const syncStart = (): Promise<void> => SyncService.Start();

@@ -18,6 +18,23 @@
         void api.syncStart().catch(() => ui.flash("Couldn't start a sync")),
     },
     {
+      name: "Settings",
+      aliases: [
+        "preferences",
+        "ai",
+        "llm",
+        "providers",
+        "ollama",
+        "openrouter",
+      ],
+      run: () => (ui.screen = "settings"),
+    },
+    {
+      name: "Back to mail",
+      aliases: ["inbox", "close settings"],
+      run: () => (ui.screen = "mail"),
+    },
+    {
       name: "Show keyboard shortcuts",
       aliases: ["help", "keys", "?"],
       run: () => (ui.overlay = "help"),

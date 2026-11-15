@@ -10,6 +10,8 @@ class UI {
   count = $state<number | undefined>(undefined);
   whichKey = $state(false);
   hint = $state("");
+  /** Which screen the signed-in app shows. */
+  screen = $state<"mail" | "settings">("mail");
   paletteQuery = $state("");
   theme = $state<Theme>("auto");
   /** Set by the app: cancel a pending prefix, or run a which-key entry. */
