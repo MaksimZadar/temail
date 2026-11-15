@@ -51,6 +51,9 @@ type MailboxState struct {
 	// Unseen is the number of messages in the mailbox without \Seen, as of the
 	// last reconcile of the mailbox. It is 0 until the first sync.
 	Unseen uint32
+	// UIDNext is the server's UIDNEXT at the last successful sync. 0 means no
+	// sync has recorded one yet.
+	UIDNext uint32
 	// HighestUID is the highest UID cached for the current UIDVALIDITY epoch.
 	// It is 0 when nothing is cached.
 	HighestUID uint32
@@ -144,8 +147,10 @@ type Store interface {
 	DeleteMailboxesNotIn(ctx context.Context, account string, names []string) error
 	// GetSyncState returns the cached state of every mailbox of the account.
 	GetSyncState(ctx context.Context, account string) ([]MailboxState, error)
-	// MarkSynced records that a sync of mailbox completed at at.
-	MarkSynced(ctx context.Context, account, mailbox string, at time.Time) error
+	// MarkSynced records that a sync of mailbox completed at at, and the server's
+	// UIDNEXT that the sync saw. The watcher compares that UIDNEXT with the next
+	// STATUS to see new mail.
+	MarkSynced(ctx context.Context, account, mailbox string, at time.Time, uidNext uint32) error
 	// PurgeMailbox deletes the placements of the mailbox, then every message and
 	// body that is left with no placement, and resets its HighestUID, LastSync
 	// and Unseen. The UIDVALIDITY is kept.
@@ -193,6 +198,9 @@ type Store interface {
 
 	// Counts returns the message and body counts of every mailbox of the account.
 	Counts(ctx context.Context, account string) ([]MailboxCounts, error)
+	// MembershipOfMessages returns the placements of many messages in one query,
+	// keyed by message id. Messages without placements are absent.
+	MembershipOfMessages(ctx context.Context, account string, mids []string) (map[string][]Placement, error)
 	// MembershipOf returns every placement of the message that the key points
 	// at: its folder and labels. ErrNotFound if the key has no placement.
 	MembershipOf(ctx context.Context, key MessageKey) ([]Placement, error)

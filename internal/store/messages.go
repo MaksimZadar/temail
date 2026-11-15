@@ -236,13 +236,23 @@ func (s *sqliteStore) UpsertHeaders(ctx context.Context, account string, headers
 		}
 		defer msgStmt.Close()
 		plStmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO placements (account, mailbox, uidvalidity, uid, mid)
-			VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (account, mailbox, uidvalidity, uid) DO UPDATE SET mid = excluded.mid`)
+			INSERT INTO placements (account, mailbox, uidvalidity, uid, mid, date)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (account, mailbox, uidvalidity, uid) DO UPDATE SET
+				mid = excluded.mid, date = excluded.date`)
 		if err != nil {
 			return err
 		}
 		defer plStmt.Close()
+		priorStmt, err := tx.PrepareContext(ctx, `
+			SELECT mid FROM placements WHERE account = ? AND mailbox = ? AND uidvalidity = ? AND uid = ?`)
+		if err != nil {
+			return err
+		}
+		defer priorStmt.Close()
+		// Messages whose only placement was re-pointed to another message. They
+		// are collected at the end of the transaction.
+		var repointed []string
 
 		for _, h := range headers {
 			from, err := json.Marshal(nonNilAddrs(h.From))
@@ -266,9 +276,20 @@ func (s *sqliteStore) UpsertHeaders(ctx context.Context, account string, headers
 				string(from), string(to), toMillis(h.Date), string(flags), h.InReplyTo, h.References); err != nil {
 				return fmt.Errorf("store UID %d in %s: %w", h.UID, h.Mailbox, err)
 			}
-			if _, err := plStmt.ExecContext(ctx, account, h.Mailbox, h.UIDValidity, h.UID, mid); err != nil {
+			var prior string
+			err = priorStmt.QueryRowContext(ctx, account, h.Mailbox, h.UIDValidity, h.UID).Scan(&prior)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if _, err := plStmt.ExecContext(ctx, account, h.Mailbox, h.UIDValidity, h.UID, mid, toMillis(h.Date)); err != nil {
 				return fmt.Errorf("place UID %d in %s: %w", h.UID, h.Mailbox, err)
 			}
+			if prior != "" && prior != mid {
+				repointed = append(repointed, prior)
+			}
+		}
+		if err := gcMessages(ctx, tx, account, repointed); err != nil {
+			return err
 		}
 
 		for mb, top := range highest {
@@ -394,27 +415,14 @@ const headerColumns = `
 	m.from_json, m.to_json, m.date, m.flags, m.in_reply_to, m.refs`
 
 // ListMessages implements Store. It lists the placements of one mailbox, newest
-// first by message date. The cursor is (date, UID) within the mailbox.
+// first by message date. The cursor is (date, UID) within the mailbox. The date
+// is read from placements, so the page comes from placements_list in index
+// order, and only the page's rows are joined to messages.
 func (s *sqliteStore) ListMessages(ctx context.Context, account, mailbox string, opts ListOptions) ([]model.MessageHeader, error) {
-	limit := opts.Limit
-	if limit <= 0 || limit > MaxListLimit {
-		return nil, fmt.Errorf("store: list limit %d out of range 1-%d", limit, MaxListLimit)
+	q, args, err := listMessagesQuery(account, mailbox, opts)
+	if err != nil {
+		return nil, err
 	}
-	q := `
-		SELECT ` + headerColumns + `
-		FROM placements p
-		JOIN messages m ON m.account = p.account AND m.mid = p.mid
-		WHERE p.account = ? AND p.mailbox = ?
-		  AND p.uidvalidity = (SELECT uidvalidity FROM mailboxes WHERE account = ? AND name = ?)`
-	args := []any{account, mailbox, account, mailbox}
-	if opts.Before != nil {
-		q += ` AND (m.date < ? OR (m.date = ? AND p.uid < ?))`
-		ms := toMillis(opts.Before.Date)
-		args = append(args, ms, ms, opts.Before.UID)
-	}
-	q += ` ORDER BY m.date DESC, p.uid DESC LIMIT ?`
-	args = append(args, limit)
-
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -429,6 +437,31 @@ func (s *sqliteStore) ListMessages(ctx context.Context, account, mailbox string,
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// listMessagesQuery builds the SQL of ListMessages. It is a separate function so
+// the tests can run EXPLAIN QUERY PLAN on the same text.
+func listMessagesQuery(account, mailbox string, opts ListOptions) (string, []any, error) {
+	limit := opts.Limit
+	if limit <= 0 || limit > MaxListLimit {
+		return "", nil, fmt.Errorf("store: list limit %d out of range 1-%d", limit, MaxListLimit)
+	}
+	q := `
+		SELECT ` + headerColumns + `
+		FROM placements p
+		JOIN messages m ON m.account = p.account AND m.mid = p.mid
+		WHERE p.account = ? AND p.mailbox = ?
+		  AND p.uidvalidity = (SELECT uidvalidity FROM mailboxes WHERE account = ? AND name = ?)`
+	args := []any{account, mailbox, account, mailbox}
+	if opts.Before != nil {
+		// A row-value comparison lets SQLite seek into placements_list. The
+		// OR form of the same test scans from the start of the mailbox.
+		q += ` AND (p.date, p.uid) < (?, ?)`
+		args = append(args, toMillis(opts.Before.Date), opts.Before.UID)
+	}
+	q += ` ORDER BY p.date DESC, p.uid DESC LIMIT ?`
+	args = append(args, limit)
+	return q, args, nil
 }
 
 // GetMessage implements Store.
@@ -671,20 +704,13 @@ func (s *sqliteStore) MembershipOf(ctx context.Context, key MessageKey) ([]Place
 	return out, rows.Err()
 }
 
-// Counts implements Store. Messages are the placements of a mailbox. Bodies are
-// the placements whose message has a cached body. Both are indexed reads on the
-// placement primary key.
+// Counts implements Store. The counts are read from the counters on mailboxes,
+// which the triggers in schema.go keep current. The read is one row per mailbox,
+// so its cost does not depend on how many messages are cached.
 func (s *sqliteStore) Counts(ctx context.Context, account string) ([]MailboxCounts, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT mb.name,
-			(SELECT COUNT(*) FROM placements p
-				WHERE p.account = mb.account AND p.mailbox = mb.name
-				  AND p.uidvalidity = mb.uidvalidity),
-			(SELECT COUNT(*) FROM placements p
-				JOIN messages m ON m.account = p.account AND m.mid = p.mid
-				WHERE p.account = mb.account AND p.mailbox = mb.name
-				  AND p.uidvalidity = mb.uidvalidity AND m.body_state = 'cached')
-		FROM mailboxes mb WHERE mb.account = ? ORDER BY mb.name`, account)
+		SELECT name, placements_count, bodies_count
+		FROM mailboxes WHERE account = ? ORDER BY name`, account)
 	if err != nil {
 		return nil, err
 	}
@@ -696,6 +722,39 @@ func (s *sqliteStore) Counts(ctx context.Context, account string) ([]MailboxCoun
 			return nil, err
 		}
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// MembershipOfMessages implements Store. One query per call, using the
+// placements_mid index. The result is keyed by message id.
+func (s *sqliteStore) MembershipOfMessages(ctx context.Context, account string, mids []string) (map[string][]Placement, error) {
+	out := make(map[string][]Placement, len(mids))
+	if len(mids) == 0 {
+		return out, nil
+	}
+	args := []any{account}
+	for _, mid := range mids {
+		args = append(args, mid)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT p.mid, p.mailbox, mb.kind, mb.display_name, p.uidvalidity, p.uid
+		FROM placements p
+		JOIN mailboxes mb ON mb.account = p.account AND mb.name = p.mailbox
+		WHERE p.account = ? AND p.mid IN (`+placeholders(len(mids))+`)
+		ORDER BY p.mid, mb.name`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var mid, kind string
+		var pl Placement
+		if err := rows.Scan(&mid, &pl.Mailbox, &kind, &pl.DisplayName, &pl.UIDValidity, &pl.UID); err != nil {
+			return nil, err
+		}
+		pl.Kind = model.MailboxKind(kind)
+		out[mid] = append(out[mid], pl)
 	}
 	return out, rows.Err()
 }

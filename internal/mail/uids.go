@@ -28,7 +28,7 @@ func (c *imapClient) ListUIDs(ctx context.Context, mailbox string) (UIDListing, 
 	if err != nil {
 		return UIDListing{}, opErr(ctx, fmt.Errorf("fetch flags from %s: %w", mailbox, err))
 	}
-	out := UIDListing{UIDValidity: data.UIDValidity, Messages: make([]UIDState, 0, len(bufs))}
+	out := UIDListing{UIDValidity: data.UIDValidity, UIDNext: uint32(data.UIDNext), Messages: make([]UIDState, 0, len(bufs))}
 	for _, buf := range bufs {
 		out.Messages = append(out.Messages, uidStateFromBuffer(buf))
 	}

@@ -360,13 +360,13 @@ type fakeStore struct {
 	// stats is returned by CacheStats; statsAccount records the account asked for.
 	stats        store.CacheStats
 	statsAccount string
-	// members maps a placement to the mailboxes its message is in.
-	members map[store.MessageKey][]store.Placement
+	// membersByMID maps a message id to the mailboxes it is in.
+	membersByMID map[string][]store.Placement
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{headers: map[store.MessageKey]model.MessageHeader{}, bodies: map[store.MessageKey]store.Body{},
-		members: map[store.MessageKey][]store.Placement{}}
+		membersByMID: map[string][]store.Placement{}}
 }
 
 func (f *fakeStore) GetSyncState(context.Context, string) ([]store.MailboxState, error) {
@@ -393,11 +393,24 @@ func (f *fakeStore) CacheStats(_ context.Context, account string) (store.CacheSt
 func (f *fakeStore) MembershipOf(_ context.Context, key store.MessageKey) ([]store.Placement, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	pl, ok := f.members[key]
+	h, ok := f.headers[key]
 	if !ok {
 		return nil, store.ErrNotFound
 	}
-	return pl, nil
+	return f.membersByMID[h.InternalID], nil
+}
+
+// MembershipOfMessages answers from membersByMID, for the message ids asked.
+func (f *fakeStore) MembershipOfMessages(_ context.Context, _ string, mids []string) (map[string][]store.Placement, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string][]store.Placement{}
+	for _, mid := range mids {
+		if pl, ok := f.membersByMID[mid]; ok {
+			out[mid] = pl
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeStore) ListMessages(_ context.Context, _, _ string, opts store.ListOptions) ([]model.MessageHeader, error) {
