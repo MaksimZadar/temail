@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { ui } from "../stores/ui.svelte";
   import { sync } from "../stores/sync.svelte";
+  import { trapFocus } from "../focus";
   import SyncList from "./SyncList.svelte";
 
   let panel: HTMLDivElement;
@@ -23,6 +24,7 @@
     aria-label="Sync status"
     tabindex="-1"
     bind:this={panel}
+    use:trapFocus
     onclick={(e) => e.stopPropagation()}
   >
     <header>

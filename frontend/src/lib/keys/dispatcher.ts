@@ -18,6 +18,8 @@ export interface DispatcherOptions {
   /** An overlay (help, palette) is open: only Escape is handled, to close it. */
   overlayOpen: () => boolean;
   closeOverlay: () => void;
+  /** Other keys while an overlay is open (for example `q`). True if handled. */
+  overlayKey?: (token: string) => boolean;
   onPendingChange?: (pending: string[], count: number | undefined) => void;
   onHint?: (text: string) => void;
 }
@@ -80,6 +82,12 @@ export class Dispatcher {
     if (this.o.overlayOpen()) {
       if (token === "Escape") {
         this.o.closeOverlay();
+        e.preventDefault();
+        return true;
+      }
+      // Typing in a field inside the overlay (the palette) is never ours.
+      if (isEditable(e.target)) return false;
+      if (this.o.overlayKey?.(token)) {
         e.preventDefault();
         return true;
       }

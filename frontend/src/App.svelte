@@ -21,6 +21,14 @@
       run: (b, count) => ui.run(b, count),
       overlayOpen: () => ui.overlay !== "none",
       closeOverlay: () => (ui.overlay = "none"),
+      // Esc closes any overlay. q closes the read-only ones, and ? toggles help.
+      overlayKey: (t) => {
+        const closes =
+          (t === "q" && ui.overlay !== "palette") ||
+          (t === "?" && ui.overlay === "help");
+        if (closes) ui.overlay = "none";
+        return closes;
+      },
       onPendingChange: (p, c) => ui.setPending(p, c),
       onHint: (t) => ui.flash(t),
     });

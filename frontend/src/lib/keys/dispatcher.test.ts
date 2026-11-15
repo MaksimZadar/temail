@@ -20,13 +20,15 @@ function setup(
 ) {
   const run = vi.fn(() => true);
   const closeOverlay = vi.fn();
+  const overlayKey = vi.fn((t: string) => t === "q");
   const d = new Dispatcher({
     contexts: () => contexts,
     run,
     overlayOpen: () => overlay,
     closeOverlay,
+    overlayKey,
   });
-  return { d, run, closeOverlay };
+  return { d, run, closeOverlay, overlayKey };
 }
 
 describe("Dispatcher", () => {
@@ -218,5 +220,25 @@ describe("keymap table", () => {
         false,
       );
     }
+  });
+});
+
+describe("overlay keys", () => {
+  it("Esc and q close an open overlay, even with focus inside it", () => {
+    const { d, closeOverlay, overlayKey } = setup(["main", "global"], true);
+    const dialog = document.createElement("div");
+    expect(d.handle(key("Escape", { target: dialog }))).toBe(true);
+    expect(closeOverlay).toHaveBeenCalledTimes(1);
+    expect(d.handle(key("q", { target: dialog }))).toBe(true);
+    expect(overlayKey).toHaveBeenCalledWith("q");
+  });
+
+  it("never treats typing in the palette input as a shortcut, but Esc still closes", () => {
+    const { d, closeOverlay, overlayKey } = setup(["main", "global"], true);
+    const input = document.createElement("input");
+    expect(d.handle(key("q", { target: input }))).toBe(false);
+    expect(overlayKey).not.toHaveBeenCalled();
+    expect(d.handle(key("Escape", { target: input }))).toBe(true);
+    expect(closeOverlay).toHaveBeenCalled();
   });
 });

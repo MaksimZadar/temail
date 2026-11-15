@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, tick } from "svelte";
   import { mail } from "../stores/mail.svelte";
   import { layout } from "../stores/layout.svelte";
   import { ui } from "../stores/ui.svelte";
@@ -26,6 +27,9 @@
   const links = $derived(prepared?.links ?? []);
 
   let frame = $state<HTMLIFrameElement>();
+  let bodyEl = $state<HTMLDivElement>();
+  /** True while the keyboard is inside the message frame (a separate document). */
+  let frameFocused = $state(false);
   let pane = $state<HTMLElement>();
   let showLinks = $state(false);
   let pendingLink = $state<MailLink | null>(null);
@@ -40,18 +44,68 @@
     attError = {};
   });
 
+  /**
+   * Put keyboard focus on the message pane. It goes to a host element, never
+   * into the frame: keys typed inside a frame never reach the app, so h, Esc
+   * and friends would stop working.
+   */
   export function focusBody(): void {
+    frameFocused = false;
     if (showPlain) pane?.querySelector<HTMLElement>(".plain")?.focus();
-    else frame?.focus();
+    else bodyEl?.focus();
   }
 
-  /** Scroll the plain-text body. Returns false when the body is a frame. */
-  export function scrollBody(dy: number): boolean {
-    const el = pane?.querySelector<HTMLElement>(".plain");
-    if (!el) return false;
-    el.scrollBy({ top: dy });
-    return true;
+  /** Give the keys back to the app after the frame took them (click or Tab). */
+  export function releaseFrame(): void {
+    frameFocused = false;
+    (frame as HTMLElement | undefined)?.blur();
+    bodyEl?.focus();
   }
+
+  type Step = "line" | "half" | "page" | "top" | "bottom";
+
+  /**
+   * Scroll the message from the keyboard. A sandboxed frame can't be scrolled
+   * by the app (no same-origin, no scripts), so the formatted view switches to
+   * plain text, which the app scrolls itself. `g h` switches back.
+   */
+  export async function scrollView(
+    step: Step,
+    dir: 1 | -1,
+    count = 1,
+  ): Promise<void> {
+    if (!m) return;
+    if (!showPlain) {
+      mail.plain = true;
+      ui.flash("Plain text, so the keys can scroll. g h switches back.");
+      await tick();
+    }
+    const el = pane?.querySelector<HTMLElement>(".plain");
+    if (!el) return;
+    const h = el.clientHeight || 400;
+    if (step === "top") el.scrollTop = 0;
+    else if (step === "bottom") el.scrollTop = el.scrollHeight;
+    else {
+      const unit = step === "line" ? 48 : step === "half" ? h / 2 : h * 0.9;
+      el.scrollBy({ top: dir * unit * count });
+    }
+  }
+
+  // The frame owns the keyboard once it is clicked. Notice that and offer a way out.
+  onMount(() => {
+    const check = (): void => {
+      frameFocused = !!frame && document.activeElement === frame;
+    };
+    const onBlur = (): void => void setTimeout(check, 0);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", check);
+    document.addEventListener("focusin", check);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", check);
+      document.removeEventListener("focusin", check);
+    };
+  });
 
   /** Close the links list or the open-link prompt. True if something closed. */
   export function closeLinks(): boolean {
@@ -256,7 +310,19 @@
       </ul>
     {/if}
 
-    <div class="body">
+    {#if frameFocused}
+      <div class="trap" role="status">
+        <span
+          >The message has your keyboard. Click outside it or press Tab to get
+          your keys back.</span
+        >
+        <button class="btn small" type="button" onclick={releaseFrame}
+          >Back to keys</button
+        >
+      </div>
+    {/if}
+
+    <div class="body" tabindex="-1" bind:this={bodyEl}>
       {#if showPlain}
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <pre class="plain" tabindex="0" aria-label="Message text">{plainText ||
@@ -265,6 +331,7 @@
         <iframe
           bind:this={frame}
           title="Message body"
+          tabindex="-1"
           sandbox=""
           referrerpolicy="no-referrer"
           {srcdoc}
@@ -434,6 +501,18 @@
     flex: 1;
     min-height: 0;
     display: flex;
+  }
+  .body:focus {
+    outline: none;
+  }
+  .trap {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.35rem 1rem;
+    background: var(--accent-soft);
+    border-bottom: 1px solid var(--line);
   }
   iframe {
     flex: 1;

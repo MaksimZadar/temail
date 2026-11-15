@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { keymap, isReserved, formatKeys } from "../keys/keymap";
   import { ui } from "../stores/ui.svelte";
+  import { trapFocus } from "../focus";
 
   let dialog: HTMLDivElement;
   let opener: Element | null = null;
@@ -23,6 +24,7 @@
   });
 </script>
 
+<!-- svelte-ignore a11y_click_events_have_key_events -->
 <div class="scrim" role="presentation" onclick={() => (ui.overlay = "none")}>
   <div
     class="card"
@@ -31,13 +33,13 @@
     aria-labelledby="help-title"
     tabindex="-1"
     bind:this={dialog}
+    use:trapFocus
     onclick={(e) => e.stopPropagation()}
-    onkeydown={(e) => e.stopPropagation()}
   >
     <header>
       <h2 id="help-title">Keyboard shortcuts</h2>
       <button class="btn" type="button" onclick={() => (ui.overlay = "none")}
-        >Close</button
+        >Close <kbd>Esc</kbd></button
       >
     </header>
     <p class="note">
