@@ -151,8 +151,10 @@ func (f *fakeSecrets) probes() int {
 
 // Status and Capabilities satisfy mail.Client. The services tests do not use
 // them, so they answer with empty values.
-func (c *fakeClient) Status(context.Context, string) (mail.MailboxStatus, error) {
-	return mail.MailboxStatus{}, nil
+func (c *fakeClient) Status(_ context.Context, mailbox string) (mail.MailboxStatus, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.statuses[mailbox], nil
 }
 
 func (c *fakeClient) Capabilities() []string { return nil }
@@ -178,11 +180,13 @@ type fakeClient struct {
 	connects  int
 	closes    int
 
-	boxes   []model.Mailbox
-	listing mail.UIDListing
-	listErr error
-	headers []model.MessageHeader
-	info    mail.MailboxInfo
+	boxes []model.Mailbox
+	// statuses is what Status returns per mailbox (zero when absent).
+	statuses map[string]mail.MailboxStatus
+	listing  mail.UIDListing
+	listErr  error
+	headers  []model.MessageHeader
+	info     mail.MailboxInfo
 
 	message    model.Message
 	messageErr error
