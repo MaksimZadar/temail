@@ -378,7 +378,7 @@ describe("the form", () => {
   it("explains a re-entry error and puts focus on the key field", async () => {
     m.saveProvider.mockRejectedValueOnce(
       new Error(
-        "the base URL changed; enter the API key again so it is not sent to the new address",
+        "key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again",
       ),
     );
     await openSettings([cloud({ enabled: true })]);
@@ -531,7 +531,7 @@ describe("the form", () => {
   it("explains a key that already exists when creating a provider", async () => {
     m.saveProvider.mockRejectedValueOnce(
       new Error(
-        "an API key exists that was not approved for this base URL; enter the API key again",
+        "key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again",
       ),
     );
     await openSettings([]);
@@ -548,7 +548,7 @@ describe("the form", () => {
   it("asks to re-enter a key saved before the address lock", async () => {
     m.saveProvider.mockRejectedValueOnce(
       new Error(
-        "an API key exists that was not approved for this base URL; enter the API key again",
+        "key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again",
       ),
     );
     await openSettings([cloud({ enabled: true })]);
@@ -564,24 +564,46 @@ describe("the form", () => {
     ).toBeInTheDocument();
   });
 
-  it("hints at re-entering the key when a keyed provider's test fails with 'other'", async () => {
+  it("an exact key_needs_reentry test result offers to enter the key, with focus on the field", async () => {
     m.testProvider.mockResolvedValue({
       ok: false,
-      category: "other",
-      message: "The provider request failed.",
+      category: "key_needs_reentry",
+      message:
+        "The stored API key was not approved for this base URL. Enter the API key again.",
     });
     await openSettings([cloud({ enabled: true })]);
     await fireEvent.click(await screen.findByRole("button", { name: "Test" }));
     expect(
-      await screen.findByText(/re-enter the key once/),
+      await screen.findByText("Enter the API key again"),
     ).toBeInTheDocument();
-    expect(screen.getByText(/redirected somewhere else/)).toBeInTheDocument();
+    expect(screen.getByText(/re-enter the key once/)).toBeInTheDocument();
+    await fireEvent.click(
+      screen.getByRole("button", { name: "Enter the key" }),
+    );
+    await screen.findByRole("heading", { name: "Edit openrouter" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText("API key")),
+    );
+  });
+
+  it("a plain 'other' result no longer pretends the key is the problem", async () => {
+    m.testProvider.mockResolvedValue({
+      ok: false,
+      category: "other",
+      message: "x",
+    });
+    await openSettings([cloud({ enabled: true })]);
+    await fireEvent.click(await screen.findByRole("button", { name: "Test" }));
+    expect(
+      await screen.findByText(/redirected somewhere else/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/re-enter the key once/)).toBeNull();
   });
 
   it("explains re-entry when listing models needs it", async () => {
     m.listModels.mockRejectedValue(
       new Error(
-        "an API key exists that was not approved for this base URL; enter the API key again",
+        "key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again",
       ),
     );
     await openSettings([cloud({ enabled: true })]);
