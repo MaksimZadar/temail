@@ -34,7 +34,7 @@ func TestClientInterfaceHasNoWriteMethods(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"Connect", "ListMailboxes", "MailboxInfo", "FetchHeaders", "FetchMessage", "FetchAttachment", "Close"}
+	want := []string{"Connect", "ListMailboxes", "MailboxInfo", "FetchHeaders", "ListUIDs", "FetchMessage", "FetchAttachment", "Close"}
 	if typ.NumMethod() != len(want) {
 		t.Errorf("Client has %d methods, want exactly %d (%v): adding a method needs a read-only review", typ.NumMethod(), len(want), want)
 	}
@@ -108,6 +108,9 @@ func TestReadOnlyAcrossAllOperations(t *testing.T) {
 			}
 			if _, err := c.FetchHeaders(ctx, "INBOX", AllUIDs()); err != nil {
 				t.Fatalf("FetchHeaders: %v", err)
+			}
+			if _, err := c.ListUIDs(ctx, "INBOX"); err != nil {
+				t.Fatalf("ListUIDs: %v", err)
 			}
 			for uid := uint32(1); uid <= 3; uid++ {
 				if _, err := c.FetchMessage(ctx, "INBOX", uid); err != nil {

@@ -11,7 +11,8 @@ interface), `github.com/jhillyerd/enmime` for MIME, and
 
 - The `Client` interface has no write methods. A test checks the method names.
 - The implementation issues only: `LOGIN`, `LIST`, `STATUS`, `EXAMINE` (SELECT
-  with `ReadOnly`), `UID SEARCH`, `UID FETCH` with `BODY.PEEK`, `LOGOUT`/close.
+  with `ReadOnly`), `UID SEARCH`, `UID FETCH` (headers, flags and bodies, the
+  bodies with `BODY.PEEK`), `LOGOUT`/close.
   It never sends `STORE`, `COPY`, `MOVE`, `EXPUNGE`, `APPEND`, `CREATE`,
   `DELETE`, `RENAME`, `SUBSCRIBE` or `UNSUBSCRIBE`.
 - Three checks back this up in the test suite:
@@ -54,6 +55,10 @@ listed.
   range and fetches them in batches of `BatchSize` (200). `UIDsAbove(n)` gives
   the incremental-sync range. The server's `n:*` answer is filtered so that a
   range above the highest UID returns nothing.
+- **UID listing.** `ListUIDs(mailbox)` returns the UIDVALIDITY and every
+  message's UID and flags. It issues `UID SEARCH ALL` and `UID FETCH FLAGS` in
+  batches of `BatchSize`, with no headers or bodies. The sync uses it to plan
+  header fetches and to reconcile deletions and flags.
 - **Mailbox state.** `MailboxInfo` returns `UIDValidity`, `UIDNext`,
   `HighestUID` (`UIDNext-1`, an upper bound that may include expunged UIDs) and
   the message count. If `UIDValidity` changes, the cache for that mailbox must
@@ -111,6 +116,7 @@ confirmation. `cmd/mailprobe -trust` only pins untrusted certificates.
 
 ## Tests
 
+`uids_test.go` covers `ListUIDs`: batching, flags, UIDVALIDITY and an empty mailbox.
 `bridge_test.go` starts an in-memory IMAP server (`imapserver/imapmemserver`)
 on `127.0.0.1` with a self-signed certificate. `fixtures_test.go` holds the
 messages: multipart/alternative, HTML with script and remote image, attachments
