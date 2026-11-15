@@ -19,7 +19,12 @@
   const errs = $derived(form.showErrors ? form.errors : {});
   const cloud = $derived(form.kind === "cloud");
 
-  onMount(() => void tick().then(() => heading?.focus()));
+  onMount(
+    () =>
+      void tick().then(() =>
+        form.keyNeeded ? keyInput?.focus() : heading?.focus(),
+      ),
+  );
 
   const pick = (id: PresetId): void => form.applyPreset(id);
 

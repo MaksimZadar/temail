@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { LLMProvider } from "../api";
-  import { RELOCK_HINT, testCopy } from "../llm/errors";
+  import { testCopy } from "../llm/errors";
   import type { TestState } from "../llm/store.svelte";
 
   let {
@@ -20,7 +20,7 @@
     ondefault: () => void;
     ondelete: () => void;
     ontoggle: (enabled: boolean) => void;
-    onrecover: (action: "edit" | "enable" | "retry") => void;
+    onrecover: (action: "edit" | "enable" | "retry" | "key") => void;
   } = $props();
 
   const cloud = $derived(p.kind === "cloud");
@@ -79,9 +79,6 @@
       <div class="out" class:ok={result.ok} class:bad={!result.ok}>
         <strong>{copy.title}</strong>
         <span>{copy.hint}</span>
-        {#if !result.ok && result.category === "other" && p.hasKey}
-          <span>{RELOCK_HINT}</span>
-        {/if}
         {#if !result.ok && copy.action}
           <button
             class="btn small"

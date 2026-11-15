@@ -13,7 +13,7 @@ import * as api from "../api";
 import { ProviderForm } from "./form.svelte";
 import { kindFor, presetById } from "./presets";
 import { validate, type FormValues } from "./validate";
-import { saveErrorCopy, testCopy } from "./errors";
+import { isKeyReentry, saveErrorCopy, testCopy } from "./errors";
 
 const m = vi.mocked(api);
 
@@ -260,7 +260,7 @@ describe("saving", () => {
   it("explains the re-entry rule when the address changed", async () => {
     m.saveProvider.mockRejectedValue(
       new Error(
-        "the base URL changed; enter the API key again so it is not sent to the new address",
+        "key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again",
       ),
     );
     form.startEdit(provider());
@@ -380,6 +380,7 @@ describe("error copy", () => {
     "no_model",
     "keyring_unavailable",
     "other",
+    "key_needs_reentry",
   ];
   it.each(cats)("%s has a title and a hint", (c) => {
     const t = testCopy(c);
@@ -388,6 +389,17 @@ describe("error copy", () => {
   });
   it("unknown categories use the generic copy", () => {
     expect(testCopy("brand_new")).toEqual(testCopy("other"));
+  });
+  it("matches re-entry only on the key_needs_reentry: prefix", () => {
+    expect(isKeyReentry(new Error("key_needs_reentry: anything"))).toBe(true);
+    expect(isKeyReentry(new Error("save: key_needs_reentry: x"))).toBe(true);
+    expect(isKeyReentry(new Error("please enter the API key again"))).toBe(
+      false,
+    );
+    expect(isKeyReentry(new Error("the base URL changed"))).toBe(false);
+  });
+  it("re-entry offers the key action", () => {
+    expect(testCopy("key_needs_reentry").action).toBe("key");
   });
   it("failures offer a recovery action, success does not", () => {
     expect(testCopy("ok").action).toBeUndefined();
@@ -418,7 +430,7 @@ describe("error copy", () => {
   });
   it("re-entry copy depends on where it happens", () => {
     const e = new Error(
-      "an API key exists that was not approved for this base URL; enter the API key again",
+      "key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again",
     );
     expect(
       saveErrorCopy(e, { mode: "create", urlChanged: false }).body,

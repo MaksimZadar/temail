@@ -1,8 +1,8 @@
 export interface TestCopy {
   title: string;
   hint: string;
-  /** Where the recovery button goes. */
-  action?: "edit" | "enable" | "retry";
+  /** Where the recovery button goes. "key" opens the form on the API key field. */
+  action?: "edit" | "enable" | "retry" | "key";
   actionLabel?: string;
 }
 
@@ -42,6 +42,12 @@ const COPY: Record<string, TestCopy> = {
     action: "retry",
     actionLabel: "Test again",
   },
+  key_needs_reentry: {
+    title: "Enter the API key again",
+    hint: "Please re-enter the key once so temail can lock it to this address.",
+    action: "key",
+    actionLabel: "Enter the key",
+  },
   cloud_disabled: {
     title: "This cloud provider is turned off",
     hint: "Nothing is sent while it is off. Turn it on to test it.",
@@ -74,10 +80,9 @@ export const testCopy = (category: string): TestCopy =>
 const text = (e: unknown): string =>
   e instanceof Error ? e.message : String(e ?? "");
 
+/** Go prefixes this error with `key_needs_reentry:`. Match on that prefix only. */
 export const isKeyReentry = (e: unknown): boolean =>
-  /enter the API key again|not approved for this base URL|base URL changed/i.test(
-    text(e),
-  );
+  /(^|[\s:])key_needs_reentry:/.test(text(e));
 
 /** The OS confirmation for turning on a cloud provider was declined or not shown. */
 export const isEnableDeclined = (e: unknown): boolean =>

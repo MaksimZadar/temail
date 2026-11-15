@@ -89,8 +89,14 @@
     }
   }
 
-  function recover(p: LLMProvider, a: "edit" | "enable" | "retry"): void {
-    if (a === "edit") edit(p);
+  function recover(
+    p: LLMProvider,
+    a: "edit" | "enable" | "retry" | "key",
+  ): void {
+    if (a === "key") {
+      edit(p);
+      form.keyNeeded = true; // the form puts focus on the key field
+    } else if (a === "edit") edit(p);
     else if (a === "enable") confirm = { kind: "enable", p };
     else void llm.test(p.name);
   }
