@@ -38,35 +38,35 @@ type Mailbox struct {
 
 // Address is an RFC 5322 mailbox address.
 type Address struct {
-	Name  string
-	Email string
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 // MessageHeader is the envelope-level view of one message. The pair
 // (Mailbox, UIDValidity, UID) identifies it; Message-ID is not unique enough
 // to key on.
 type MessageHeader struct {
-	Mailbox     string
-	UIDValidity uint32
-	UID         uint32
-	MessageID   string
-	Subject     string
-	From        []Address
-	To          []Address
-	Date        time.Time
+	Mailbox     string    `json:"mailbox"`
+	UIDValidity uint32    `json:"uidValidity"`
+	UID         uint32    `json:"uid"`
+	MessageID   string    `json:"messageId"`
+	Subject     string    `json:"subject"`
+	From        []Address `json:"from"`
+	To          []Address `json:"to"`
+	Date        time.Time `json:"date"`
 	// Flags holds IMAP flags such as "\Seen" and "\Flagged".
-	Flags      []string
-	InReplyTo  string
-	References string
+	Flags      []string `json:"flags"`
+	InReplyTo  string   `json:"inReplyTo"`
+	References string   `json:"references"`
 }
 
 // Attachment describes one non-body MIME part. PartID is the IMAP body
 // section number (for example "2" or "2.1") used to fetch its content.
 type Attachment struct {
-	Filename    string
-	ContentType string
-	Size        int64
-	PartID      string
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+	PartID      string `json:"partId"`
 }
 
 // Message is a fully fetched message. HTMLBody is already sanitised for
@@ -74,7 +74,7 @@ type Attachment struct {
 // the message has one.
 type Message struct {
 	MessageHeader
-	TextBody    string
-	HTMLBody    string
-	Attachments []Attachment
+	TextBody    string       `json:"textBody"`
+	HTMLBody    string       `json:"htmlBody"`
+	Attachments []Attachment `json:"attachments"`
 }

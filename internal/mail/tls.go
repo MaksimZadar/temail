@@ -28,6 +28,10 @@ func fingerprintOf(der []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// IsLoopbackHost reports whether host is allowed as a Bridge host: a loopback
+// IP or "localhost". Connect refuses any other host.
+func IsLoopbackHost(host string) bool { return isLoopbackHost(host) }
+
 // isLoopbackHost reports whether host names the local machine: a loopback IP
 // or "localhost".
 func isLoopbackHost(host string) bool {
