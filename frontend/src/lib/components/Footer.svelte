@@ -2,6 +2,8 @@
   import { ui } from "../stores/ui.svelte";
   import { sync } from "../stores/sync.svelte";
   import { app } from "../stores/app.svelte";
+  import { cache } from "../stores/cache.svelte";
+  import { formatBytes } from "../mail/format";
   import { formatKeys } from "../keys/keymap";
 </script>
 
@@ -29,6 +31,13 @@
           >
         {/if}
       </button>
+      {#if cache.info}
+        <span
+          class="cache"
+          title="{cache.info.messages.toLocaleString()} messages · {cache.info.bodies.toLocaleString()} bodies cached"
+          >Cache {formatBytes(cache.info.bytes)}</span
+        >
+      {/if}
       {#if !sync.running && sync.failed.length > 0}
         <button
           class="link warn"
@@ -124,6 +133,15 @@
     height: 100%;
     background: var(--accent);
     transition: width 0.25s ease-out;
+  }
+  /* Fixed minimum width and tabular digits so the footer doesn't jiggle. */
+  .cache {
+    min-width: 10ch;
+    padding-left: 0.6rem;
+    border-left: 1px solid var(--line);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    cursor: default;
   }
   .hint {
     color: var(--fg);
