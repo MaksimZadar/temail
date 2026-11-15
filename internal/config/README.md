@@ -18,9 +18,17 @@ Windows). Phase 2.
     cloud off, local on. A cloud provider receives no content until it is enabled.
   - `capabilities`: `structuredOutput`, `tools` (both bool, default false) and
     `maxContext` (tokens, 0 means unknown, negative fails validation).
-  - Provider names are not validated beyond non-empty and unique here. The
-    services layer limits them to `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`, so they fit a
-    keyring user key and an environment variable name.
+  - `keyBinding`: the `BaseURLBinding` (SHA-256 of the normalised base URL) that
+    the stored API key was approved for. It is not a secret. A key is used only
+    while `KeyBoundTo` holds, so a key never follows a changed URL. A malformed
+    binding fails validation.
+  - Provider names are validated for uniqueness and for the environment variable
+    they map to. `secrets.LLMEnvVar` folds case and "-"/"_", so `open-router` and
+    `OPEN_ROUTER` both read `TEMAIL_LLM_OPEN_ROUTER_KEY`, and a validation error
+    refuses the second one. The services layer also limits names to
+    `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`.
+- **Base URLs** (`ValidBaseURL`, shared with `internal/llm`): http(s), a host, and
+  no userinfo, query or fragment.
 - **Defaults:** host `127.0.0.1`, IMAP port `1143`, SMTP port `1025`, TLS mode
   `starttls`. A missing file loads as an empty config; omitted Bridge fields take
   these defaults on load.
