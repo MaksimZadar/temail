@@ -62,6 +62,10 @@ Rules:
 - **Output is plain text.** LLM text shown to the user is rendered as plain text.
   Markdown links, images and HTML in model output are not rendered, and the
   client never fetches a URL found in model output.
+- **Errors carry no request.** `llm.Error` keeps a category and an HTTP status,
+  not the SDK error. The SDK error holds the request, including the bearer key,
+  and the response body. Its text is fixed, and `%+v` and `%#v` print the same
+  text.
 - **Status:** the client, the config fields and the `LLMService` bound methods
   are implemented. No mail content is sent by any code in this phase. Email
   content flows to a provider only in Phase 3's categorise and label features,
@@ -168,11 +172,11 @@ The bound methods are:
 | `SyncService` | `Stop()` | Cancels the running sync and waits (15 s). On timeout it returns an error and `Status` shows `stopTimedOut` |
 | `SyncService` | `Status()` | Running flag, `stopTimedOut`, last result and last error |
 | `LLMService` | `ListProviders()` | Providers as `LLMProviderDTO` `{name, baseURL, model, kind, enabled, capabilities, isDefault, hasKey}`. `hasKey` says whether a key exists. The key is never returned |
-| `LLMService` | `SaveProvider(input)` | Creates or updates a provider from `LLMProviderInput` (includes write-only `apiKey`; empty keeps the stored key). Config first, then the keyring, with rollback. A changed base URL with a stored key needs a new key (`ErrKeyNeedsReentry`). Name is the ID and does not change |
-| `LLMService` | `DeleteProvider(name)` | Removes the provider from config (clears the default if it was it) and deletes its keyring key. Config is restored if the keyring delete fails |
+| `LLMService` | `SaveProvider(input)` | Creates or updates a provider from `LLMProviderInput` (includes write-only `apiKey`). A non-empty `apiKey` replaces the stored key and binds it to the new base URL. An empty one keeps a key only if it is bound to that URL (`ErrKeyNeedsReentry` otherwise, for new providers too). Enabling cloud needs a native confirmation (`ErrEnableDeclined`). Order: keyring, then config, rolled back on failure. The name is the ID and does not change |
+| `LLMService` | `DeleteProvider(name)` | Removes the provider from config (clears the default if it was it) and deletes its keyring key. Config is restored if the keyring delete fails. Its environment variable is not touched |
 | `LLMService` | `SetDefaultProvider(name)` | Sets the default provider; an empty name clears it |
 | `LLMService` | `TestProvider(ctx, name)` | One tiny structured call. Returns `ProviderTest` `{ok, category, message}`. Categories: the six from `internal/llm` (`ok`, `unreachable`, `unauthorized`, `model_not_found`, `structured_output_unsupported`, `timeout`, `other`) plus `cloud_disabled`, `no_model` and `keyring_unavailable` |
-| `LLMService` | `ListModels(ctx, name)` | Model IDs the endpoint lists, sorted. An endpoint without a models route returns an empty list and an error, and the UI asks for the model name |
+| `LLMService` | `ListModels(ctx, name)` | Model IDs the endpoint lists, sorted. An endpoint without a models route returns an empty list and an error, and the UI asks for the model name. A key not bound to the URL is refused (`ErrKeyNeedsReentry`) |
 
 Events emitted to the frontend (all from `SyncService`):
 
@@ -207,9 +211,27 @@ against this section and §3.2.
   cloud and on for local. `internal/llm` refuses every call to a disabled cloud
   provider (`ErrCloudDisabled`) before anything is sent. A `local` label on a
   non-loopback URL is a config error.
-- **Keys and changed URLs:** when a provider's base URL changes while it has a
-  stored key, the save fails unless a new key is entered. The old key is never
-  sent to the new address.
+- **API keys are bound to a base URL.** A key (keyring or environment) is used
+  only with the base URL it was approved for. The approval is stored as
+  `keyBinding` in `config.json`: a SHA-256 of the normalised base URL. It is not
+  a secret. An empty `apiKey` in a save keeps the key only when the binding
+  matches the new URL. Otherwise the save fails with `ErrKeyNeedsReentry`, for new
+  providers too. The client checks the same binding before every call. A key is
+  never sent to another address, even if config and keyring disagree.
+- **Environment keys follow the same rule.** `TEMAIL_LLM_<NAME>_KEY` is read as a
+  key, so it is bound like one. To use an environment key for a new provider, enter
+  it once in the UI; the save then binds it to that URL. Env names that collide
+  (`open-router` and `open_router` both read `TEMAIL_LLM_OPEN_ROUTER_KEY`) are
+  refused at validation.
+- **Enabling cloud is privileged.** Turning a cloud provider on (a new one, a
+  disabled one, or a local one changed to cloud while enabled) needs a native
+  confirmation dialog, which the webview cannot drive. Declining, closing or
+  timing out saves nothing (`ErrEnableDeclined`). Disabling never asks.
+- **Base URLs are plain.** Userinfo, query and fragment are refused, so no
+  credential or token can sit in a URL that is written to config or sent.
+- **Redirects are not followed**, and response bodies are capped (1 MiB for
+  replies, 2 MiB for model lists). A local provider dials loopback only, and
+  never through a proxy. See `internal/llm/README.md`.
 - **Local-only mode** for sensitive mail: a per-folder or per-message setting
   restricts LLM calls to `local` providers (for example Ollama). If no local
   provider is configured, the feature is unavailable for that mail. It does not
