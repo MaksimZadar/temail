@@ -1,6 +1,6 @@
 import type { Binding, Context } from "../keys/keymap";
 
-export type Overlay = "none" | "help" | "palette";
+export type Overlay = "none" | "help" | "palette" | "sync";
 export type Theme = "auto" | "light" | "dark";
 
 class UI {
@@ -11,6 +11,9 @@ class UI {
   whichKey = $state(false);
   hint = $state("");
   theme = $state<Theme>("auto");
+  /** Set by the app: cancel a pending prefix, or run a which-key entry. */
+  cancelKeys: () => void = () => {};
+  triggerBinding: (b: Binding) => void = () => {};
   private actions = new Map<string, (count: number | undefined) => void>();
   private hintTimer: ReturnType<typeof setTimeout> | undefined;
   private wkTimer: ReturnType<typeof setTimeout> | undefined;

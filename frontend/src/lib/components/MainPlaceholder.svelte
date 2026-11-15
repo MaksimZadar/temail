@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { sync } from "../stores/sync.svelte";
+  import SyncList from "./SyncList.svelte";
 
   onMount(() => {
     void sync.start();
@@ -11,33 +12,20 @@
 <main class="main">
   <h1>Your mailbox is syncing</h1>
   <p class="dim">The folder and message views arrive in the next update.</p>
-  <div class="card" role="status" aria-live="polite">
+  <section class="card" aria-label="Sync progress">
     <p class="state">{sync.text}</p>
     {#if sync.fraction !== null}
-      <progress value={sync.fraction} max="1" aria-label="Sync progress"
+      <progress value={sync.fraction} max="1" aria-label="Overall sync progress"
       ></progress>
     {/if}
-    {#if sync.progress && sync.progress.bodiesTotal > 0}
-      <p class="dim">
-        Messages: {sync.progress.bodiesDone} of {sync.progress.bodiesTotal}
-      </p>
+    {#if sync.messages > 0}
+      <p class="dim">{sync.messages.toLocaleString()} messages cached</p>
     {/if}
     {#if sync.error}
       <p class="err" role="alert">{sync.error}</p>
     {/if}
-    {#if sync.result}
-      <p class="dim">
-        {sync.result.headersFetched} new headers across {sync.result.mailboxes} folders.
-      </p>
-      {#if sync.result.mailboxErrors?.length}
-        <p class="err">
-          Couldn't sync: {sync.result.mailboxErrors
-            .map((m) => m.mailbox)
-            .join(", ")}
-        </p>
-      {/if}
-    {/if}
-  </div>
+    <div class="list"><SyncList /></div>
+  </section>
 </main>
 
 <style>
@@ -48,6 +36,7 @@
     gap: 0.5rem;
     height: 100%;
     padding: 2rem;
+    overflow: auto;
   }
   h1 {
     font-size: 1.3rem;
@@ -56,7 +45,7 @@
     color: var(--fg-dim);
   }
   .card {
-    min-width: 22rem;
+    width: min(30rem, 100%);
     margin-top: 1rem;
     padding: 1rem 1.25rem;
     background: var(--bg-raised);
@@ -74,5 +63,9 @@
   }
   .err {
     color: var(--danger);
+  }
+  .list {
+    max-height: 18rem;
+    overflow: auto;
   }
 </style>

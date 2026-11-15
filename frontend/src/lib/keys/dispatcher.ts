@@ -20,8 +20,6 @@ export interface DispatcherOptions {
   closeOverlay: () => void;
   onPendingChange?: (pending: string[], count: number | undefined) => void;
   onHint?: (text: string) => void;
-  /** Delay before a stalled prefix is dropped. */
-  timeoutMs?: number;
 }
 
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock"]);
@@ -50,12 +48,22 @@ export function tokenOf(e: KeyEventLike): string | null {
 export class Dispatcher {
   private pending: string[] = [];
   private count: number | undefined;
-  private timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly o: DispatcherOptions) {}
 
+  get isPending(): boolean {
+    return this.pending.length > 0 || this.count !== undefined;
+  }
+
+  /** Run a binding the user picked with the mouse (a which-key entry). */
+  trigger(b: Binding): void {
+    const count = this.count;
+    this.reset();
+    if (!this.o.run(b, count)) this.o.onHint?.("Not available yet");
+  }
+
+  /** Drop any pending prefix or count. */
   reset(): void {
-    clearTimeout(this.timer);
     this.pending = [];
     this.count = undefined;
     this.o.onPendingChange?.([], undefined);
@@ -139,13 +147,17 @@ export class Dispatcher {
       e.preventDefault();
       return true;
     }
+    // Not a valid continuation: cancel the prefix and swallow the key, so a
+    // typo never triggers some other action.
+    const hadPending = this.isPending;
     this.reset();
-    return false;
+    if (hadPending) e.preventDefault();
+    return hadPending;
   }
 
+  // A pending prefix has no timeout: the which-key popover stays up until a
+  // valid key, Esc, a click elsewhere, or a click on one of its entries.
   private arm(): void {
-    clearTimeout(this.timer);
     this.o.onPendingChange?.(this.pending, this.count);
-    this.timer = setTimeout(() => this.reset(), this.o.timeoutMs ?? 1000);
   }
 }

@@ -25,7 +25,6 @@ function setup(
     run,
     overlayOpen: () => overlay,
     closeOverlay,
-    timeoutMs: 1000,
   });
   return { d, run, closeOverlay };
 }
@@ -83,17 +82,40 @@ describe("Dispatcher", () => {
     );
   });
 
-  it("drops a stalled prefix after the timeout", () => {
+  it("keeps a prefix pending with no timeout", () => {
     const { d, run } = setup();
     d.handle(key("g"));
-    vi.advanceTimersByTime(1100);
+    vi.advanceTimersByTime(60_000);
+    expect(d.isPending).toBe(true);
     d.handle(key("i"));
-    // "i" is now a fresh key (load images), not "g i" (inbox).
     expect(run).toHaveBeenCalledTimes(1);
     expect(run).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "view.images" }),
+      expect.objectContaining({ action: "goto.inbox" }),
       undefined,
     );
+  });
+
+  it("an invalid follow-up cancels the prefix and does nothing else", () => {
+    const { d, run } = setup();
+    d.handle(key("g"));
+    expect(d.handle(key("z"))).toBe(true);
+    expect(d.isPending).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+    // The next key is a fresh key again.
+    d.handle(key("j"));
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "list.down" }),
+      undefined,
+    );
+  });
+
+  it("trigger runs a picked entry and clears the prefix", () => {
+    const { d, run } = setup();
+    d.handle(key("g"));
+    const inbox = keymap.find((b) => b.action === "goto.inbox")!;
+    d.trigger(inbox);
+    expect(run).toHaveBeenCalledWith(inbox, undefined);
+    expect(d.isPending).toBe(false);
   });
 
   it("Escape cancels a pending prefix without going back", () => {
