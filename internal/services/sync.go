@@ -2,7 +2,10 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -51,6 +54,9 @@ type SyncService struct {
 	watchPoll     time.Duration
 	newWatcher    func() mail.Watcher
 
+	// auth latches a refused login for this app session (see mailsync.AuthLatch).
+	auth *mailsync.AuthLatch
+
 	mu           sync.Mutex
 	base         context.Context // parent of every run; set by ServiceStartup
 	gen          uint64          // bumped by Stop; stale launches drop out
@@ -67,7 +73,8 @@ type SyncService struct {
 // starts one through ServiceStartup, or Start is called.
 func NewSyncService(st store.Store, cfg ConfigStore, sec PasswordSource, newClient ClientFactory, emitter Emitter) *SyncService {
 	return &SyncService{st: st, cfg: cfg, sec: sec, newClient: newClient, emitter: emitter,
-		newWatcher: func() mail.Watcher { return mail.NewWatcher() }}
+		newWatcher: func() mail.Watcher { return mail.NewWatcher() },
+		auth:       mailsync.NewAuthLatch()}
 }
 
 var (
@@ -253,7 +260,13 @@ func (s *SyncService) restart() {
 func (s *SyncService) start() error {
 	s.mu.Lock()
 	if s.done != nil {
+		// A run is active. If it is watching, a start asks for a check now, so
+		// the user's "sync" is honoured without a second run.
+		w := s.watcher
 		s.mu.Unlock()
+		if w != nil {
+			w.Kick()
+		}
 		return nil
 	}
 	gen := s.gen
@@ -270,6 +283,11 @@ func (s *SyncService) start() error {
 	}
 	if acct.CertFingerprint == "" {
 		return bridge.ErrNotPinned
+	}
+	// The latch refuses a login that was already refused with these
+	// credentials. A changed account or password clears it.
+	if err := s.auth.Check(credsKey(acct, pw)); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -298,6 +316,9 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 	defer cancel()
 
 	client := s.newClient()
+	// One connection serves the sync and then the watcher. It is closed only
+	// when the whole run ends, so the watcher does not log in again.
+	defer func() { _ = client.Close() }()
 	connect := func(ctx context.Context) error {
 		return client.Connect(ctx, acct, pw)
 	}
@@ -306,11 +327,12 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 		BodyDelay:  s.bodyDelay,
 		Backoff:    s.backoff,
 		OnProgress: s.progress,
+		Auth:       s.auth,
+		CredsKey:   credsKey(acct, pw),
 	})
 	var res mailsync.Result
 	var runErr error
 	if err != nil {
-		_ = client.Close()
 		runErr = err
 	} else {
 		res, runErr = syn.Run(ctx)
@@ -319,7 +341,11 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 	dto := toSyncResult(res)
 	partial := runErr != nil && errors.Is(runErr, mailsync.ErrPartial)
 	failed := runErr != nil && !partial
+	watch := err == nil && !stopped && !failed && !s.watchOff
 
+	// The watcher is created under the same lock that clears syncing, so Status
+	// never sees neither running nor watching while the run is still active.
+	var w *mailsync.Watcher
 	s.mu.Lock()
 	s.syncing = false
 	s.lastResult = &dto
@@ -330,10 +356,12 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 		s.lastError = runErr.Error()
 	}
 	errText := s.lastError
-	// The run keeps its slot (cancel and done stay set) when the watcher runs
-	// next, so Stop and shutdown reach it through the same context.
-	watch := err == nil && !stopped && !failed && !s.watchOff
-	if !watch {
+	if watch {
+		// The run keeps its slot (cancel and done stay set) for the watcher, so
+		// Stop and shutdown reach it through the same context.
+		w = s.newMailWatcher(syn, acct, pw)
+		s.watcher = w
+	} else {
 		s.cancel = nil
 		s.done = nil
 		s.stopTimedOut = false
@@ -348,11 +376,10 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 	default:
 		s.emit(EventSyncDone, dto)
 	}
-	if !watch {
+	if w == nil {
 		return
 	}
 
-	w := s.newMailWatcher(syn, acct, pw)
 	werr := w.Run(ctx)
 
 	s.mu.Lock()
@@ -370,8 +397,17 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 	}
 }
 
+// credsKey identifies the credentials for the auth latch: a SHA-256 over the
+// connection settings and the password. The password is never stored or logged.
+func credsKey(acct config.BridgeAccount, pw string) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%d\x00%s\x00%s\x00%s", acct.Host, acct.IMAPPort, acct.Username, acct.CertFingerprint, pw)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // newMailWatcher creates the watcher that runs after the initial sync. It uses
-// the sync's client for the reconcile checks, and its own IDLE connection.
+// the sync's client for the reconcile checks, and its own IDLE connection. The
+// caller holds s.mu and assigns the result to s.watcher.
 func (s *SyncService) newMailWatcher(syn *mailsync.Syncer, acct config.BridgeAccount, pw string) *mailsync.Watcher {
 	var idler mail.Watcher
 	if s.newWatcher != nil {
@@ -390,9 +426,6 @@ func (s *SyncService) newMailWatcher(syn *mailsync.Syncer, acct config.BridgeAcc
 			s.emit(EventSyncChanged, ChangedEvent{Mailboxes: names})
 		},
 	})
-	s.mu.Lock()
-	s.watcher = w
-	s.mu.Unlock()
 	return w
 }
 

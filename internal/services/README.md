@@ -98,8 +98,13 @@ running, and its result is cached for 30 s.
 - **Watching (phase P4 PR B).** After the first sync, `SyncService` starts the
   change watcher on the same run (see `internal/sync/README.md`). The run keeps
   its slot, so `Stop` and shutdown stop the watcher through the same context.
+  - `Start()` while the watcher runs asks it for a check now and returns nil.
+    The old "already running" answer is gone.
+  - Login refusals are latched across the sync, the poll and the IDLE connection
+    (`mailsync.AuthLatch`). After a refused login, a restart of sync returns the
+    latched error without logging in. A changed password clears it.
   - `SyncStatus` now has `running` (only during the first sync), `watching` (the
-    watcher is up), `idle` (the IDLE connection is up) and `lastChecked`.
+    watcher is up), `idle` (the IDLE connection is up on INBOX) and `lastChecked`.
     `running` used to mean "a run exists"; a UI that showed a spinner for
     `running` now sees the spinner stop once the first sync is done. `watching`
     shows the live state.
@@ -270,6 +275,10 @@ after the hook runs.
 - `mail_test.go` (membership): a listed message carries its three mailboxes,
   `GetMessage` carries them with the body, and the JSON uses the new camelCase
   fields. `ListMailboxes` carries `unseen`.
+- `sync_fix_test.go`: the handoff from sync to watching is seen by listeners as
+  watching at sync:done; Start while watching kicks a check; the latch refuses a
+  second start with the same credentials and clears on a new password; one login
+  serves the sync and the watcher.
 - `llm_test.go`: the DTO has no key and uses camelCase JSON; save validation
   writes nothing; create keeps the key out of `config.json`; an empty key keeps the
   stored one; a changed base URL needs a new key; keyring and config failures
@@ -285,3 +294,17 @@ after the hook runs.
 
 Run with `go test -race ./internal/services/`. The race detector needs cgo
 (`CGO_ENABLED=1`). The `mise run test` task runs with cgo off and no `-race`.
+
+## Notes for the frontend
+
+- `running` is true only during the first sync. Use `watching` for "the app is
+  following the mailbox", and `idle` for "new mail arrives instantly".
+- Progress events (`sync:progress`) can fire while `running` is false, because a
+  watcher check that syncs a mailbox emits them too. Do not treat the first
+  progress event as the start of a run, or the first `sync:done` as its end.
+  Use `sync:changed` for "these mailboxes changed".
+- `start` while watching is a request for a check now. It is safe to call it from
+  a "refresh" button.
+- A `lastError` of a refused login stays until the password changes or the app
+  restarts. Show it with the message from `SetupService.TestConnection`
+  (category `auth_failed`), and do not offer a retry loop.

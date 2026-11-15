@@ -20,6 +20,7 @@ import (
 // the scriptable fake client.
 type syncFixture struct {
 	svc    *SyncService
+	sec    *fakeSecrets
 	client *fakeClient
 	f      *clientFactory
 	ev     *fakeEmitter
@@ -57,7 +58,7 @@ func newSyncFixture(t *testing.T, cfg config.Config) *syncFixture {
 	svc.bodyDelay = time.Millisecond
 	svc.backoff = time.Millisecond
 	svc.stopWait = 5 * time.Second
-	return &syncFixture{svc: svc, client: client, f: f, ev: ev, cfg: cfgStore, st: st}
+	return &syncFixture{svc: svc, sec: sec, client: client, f: f, ev: ev, cfg: cfgStore, st: st}
 }
 
 // waitUntil polls cond until it holds or the test fails.

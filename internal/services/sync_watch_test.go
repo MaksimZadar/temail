@@ -34,9 +34,12 @@ func (w *fakeWatcher) Connect(ctx context.Context, _ config.BridgeAccount, _ str
 
 func (w *fakeWatcher) Capabilities() []string { return w.caps }
 
-func (w *fakeWatcher) Idle(ctx context.Context, _ string, onChange func()) error {
+func (w *fakeWatcher) Idle(ctx context.Context, _ string, started func(), onChange func()) error {
 	w.active.Add(1)
 	defer w.active.Add(-1)
+	if started != nil {
+		started()
+	}
 	for {
 		select {
 		case <-ctx.Done():
