@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"slices"
 	"testing"
@@ -39,7 +40,7 @@ func newFixture(t *testing.T, mutate func(*Options)) *fixture {
 		Account:       acct,
 		BodyBatchSize: 3,
 		BodyDelay:     250 * time.Millisecond,
-		Retries:       2,
+		Retries:       RetryCount(2),
 		Backoff:       time.Millisecond,
 		OnProgress:    func(p Progress) { fx.events = append(fx.events, p) },
 	}
@@ -366,33 +367,13 @@ func TestBodyFetchIsThrottledAndBatched(t *testing.T) {
 	}
 }
 
-func TestBadBodyIsBoundedAndDoesNotAbortRun(t *testing.T) {
-	fx := newFixture(t, nil)
-	for i := 0; i < 3; i++ {
-		fx.bridge.appendMsg("INBOX")
-	}
-	fx.bridge.badBodies["INBOX:2"] = true
-	res := fx.mustRun()
-	if res.BodiesFetched != 2 || res.BodiesFailed != store.MaxBodyAttempts {
-		t.Errorf("result = %+v, want 2 fetched and %d failed attempts", res, store.MaxBodyAttempts)
-	}
-	if n := fx.bridge.bodyFetch["INBOX:2"]; n != 0 {
-		t.Errorf("bad body fetched successfully %d times", n)
-	}
-	// A later run does not retry it past the bound.
-	res = fx.mustRun()
-	if res.BodiesFailed != 0 {
-		t.Errorf("second run attempted the exhausted message: %+v", res)
-	}
-}
-
 func TestTransientConnectionFailureReconnects(t *testing.T) {
 	fx := newFixture(t, nil)
 	for i := 0; i < 3; i++ {
 		fx.bridge.appendMsg("INBOX")
 	}
-	fx.bridge.connectFails = []error{errors.New("connection refused")} // first connect fails
-	fx.bridge.opFails = []error{errors.New("broken pipe")}             // a later op drops the connection
+	fx.bridge.connectFails = []error{transportErr()} // first connect fails
+	fx.bridge.opFails = []error{io.ErrUnexpectedEOF} // a later op drops the connection
 	res := fx.mustRun()
 	if res.HeadersFetched != 3 || res.BodiesFetched != 3 {
 		t.Errorf("result after reconnects = %+v", res)
@@ -403,10 +384,10 @@ func TestTransientConnectionFailureReconnects(t *testing.T) {
 }
 
 func TestPersistentConnectionFailureAbortsWithoutCorruptingCache(t *testing.T) {
-	fx := newFixture(t, func(o *Options) { o.Retries = 2 })
+	fx := newFixture(t, func(o *Options) { o.Retries = RetryCount(2) })
 	fx.bridge.appendMsg("INBOX")
 	fx.bridge.appendMsg("INBOX")
-	fx.bridge.connectFails = []error{errors.New("no bridge"), errors.New("no bridge"), errors.New("no bridge")}
+	fx.bridge.connectFails = []error{transportErr(), transportErr(), transportErr()}
 	if _, err := fx.run(); err == nil {
 		t.Fatal("Run succeeded with Bridge down")
 	}

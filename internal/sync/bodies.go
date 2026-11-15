@@ -5,15 +5,22 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/MaksimZadar/temail/internal/mail"
 	"github.com/MaksimZadar/temail/internal/model"
 	"github.com/MaksimZadar/temail/internal/store"
 )
 
-// syncBodies runs step 4. It reads the newest messages without a body from
-// the cache in batches and fetches each one with a delay before it. A message
-// that fails although Bridge is reachable is counted in BodiesFailed and
-// retried later, up to store.MaxBodyAttempts times. A connection that cannot
-// be restored aborts the run, and the next run resumes it.
+// syncBodies runs step 4. It pages through the messages that have no body,
+// newest first, and fetches each one with a delay before it.
+//
+// Paging uses a cursor, so a message that fails in this run is not offered
+// again in the same run. Failures are classified:
+//   - context end, or a connection that could not be restored: abort the run.
+//   - deterministic failures (message not found, unparsable): counted with
+//     store.MarkBodyFailed, so the message is dropped after
+//     store.MaxBodyAttempts runs.
+//   - anything else (a server NO or BAD during Bridge startup, unknown errors):
+//     skipped and not counted, so a transient problem cannot blank a body.
 func (s *Syncer) syncBodies(ctx context.Context, res *Result) error {
 	counts, err := s.store.Counts(ctx, s.opts.Account)
 	if err != nil {
@@ -27,16 +34,20 @@ func (s *Syncer) syncBodies(ctx context.Context, res *Result) error {
 	}
 	s.emit(Progress{Account: s.opts.Account, State: StateBodies})
 
+	var cur *store.PendingCursor
 	fetchedAny := false
 	for {
-		keys, err := s.store.PendingBodies(ctx, s.opts.Account, s.opts.BodyBatchSize)
+		page, err := s.store.PendingBodies(ctx, s.opts.Account, cur, s.opts.BodyBatchSize)
 		if err != nil {
 			return fmt.Errorf("list messages without body: %w", err)
 		}
-		if len(keys) == 0 {
+		if len(page) == 0 {
 			return nil
 		}
-		for _, key := range keys {
+		for _, pb := range page {
+			key := pb.Key
+			cur = &store.PendingCursor{Date: pb.Date, Key: key}
+
 			if fetchedAny {
 				if err := s.sleep(ctx, s.opts.BodyDelay); err != nil {
 					return err
@@ -58,13 +69,15 @@ func (s *Syncer) syncBodies(ctx context.Context, res *Result) error {
 					return ctx.Err()
 				}
 				var ce *connError
-				if errors.As(err, &ce) {
+				if errors.As(err, &ce) || isTransport(err) {
 					return err
 				}
-				if merr := s.store.MarkBodyFailed(ctx, key); merr != nil && !errors.Is(merr, store.ErrNotFound) {
-					return fmt.Errorf("record failed body fetch: %w", merr)
-				}
 				res.BodiesFailed++
+				if deterministic(err) {
+					if merr := s.store.MarkBodyFailed(ctx, key); merr != nil && !errors.Is(merr, store.ErrNotFound) {
+						return fmt.Errorf("record failed body fetch: %w", merr)
+					}
+				}
 				continue
 			}
 			if msg.uidValidity != key.UIDValidity {
@@ -81,6 +94,12 @@ func (s *Syncer) syncBodies(ctx context.Context, res *Result) error {
 			s.emitMailbox(StateBodies, key.Mailbox, 0, 0, done[key.Mailbox], total[key.Mailbox])
 		}
 	}
+}
+
+// deterministic reports failures that would repeat on every fetch of the same
+// message, so they may count toward store.MaxBodyAttempts.
+func deterministic(err error) bool {
+	return errors.Is(err, mail.ErrMessageNotFound) || errors.Is(err, mail.ErrParse)
 }
 
 // bodyResult carries one fetched message out of the retry closure.
