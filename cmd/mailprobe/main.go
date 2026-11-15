@@ -20,6 +20,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/MaksimZadar/temail/internal/bridge"
 	"github.com/MaksimZadar/temail/internal/config"
 	"github.com/MaksimZadar/temail/internal/mail"
 	"github.com/MaksimZadar/temail/internal/secrets"
@@ -46,18 +47,14 @@ func run(accountID string, trust bool, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	idx, err := pickAccount(cfg, accountID)
+	idx, err := bridge.PickAccount(cfg, accountID)
 	if err != nil {
 		return err
 	}
 	acct := cfg.Bridge[idx]
 
-	password, err := secrets.NewKeyringStore().GetBridgePassword(acct.ID)
+	password, err := bridge.Password(secrets.NewKeyringStore(), acct.ID)
 	if err != nil {
-		if errors.Is(err, secrets.ErrNotFound) {
-			return fmt.Errorf("no Bridge password for account %q: store it in the keyring or set %s",
-				acct.ID, secrets.EnvBridgePassword)
-		}
 		return fmt.Errorf("read Bridge password: %w", err)
 	}
 
@@ -114,23 +111,6 @@ func connectWithPin(ctx context.Context, mgr *config.Manager, cfg config.Config,
 		return nil, err
 	}
 	return client, nil
-}
-
-// pickAccount returns the index of the account with the given ID, or of the
-// first account when id is empty.
-func pickAccount(cfg config.Config, id string) (int, error) {
-	if len(cfg.Bridge) == 0 {
-		return 0, errors.New("no Bridge account in config.json; add one first")
-	}
-	if id == "" {
-		return 0, nil
-	}
-	for i, a := range cfg.Bridge {
-		if a.ID == id {
-			return i, nil
-		}
-	}
-	return 0, fmt.Errorf("no account %q in config.json", id)
 }
 
 func printMailboxes(ctx context.Context, client mail.Client) error {
