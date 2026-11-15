@@ -48,6 +48,9 @@ type MailboxState struct {
 	Kind        model.MailboxKind
 	DisplayName string
 	UIDValidity uint32
+	// Unseen is the number of messages in the mailbox without \Seen, as of the
+	// last reconcile of the mailbox. It is 0 until the first sync.
+	Unseen uint32
 	// HighestUID is the highest UID cached for the current UIDVALIDITY epoch.
 	// It is 0 when nothing is cached.
 	HighestUID uint32
@@ -78,18 +81,31 @@ type Body struct {
 	Attachments []model.Attachment
 }
 
-// PendingBody is one message that still needs a body.
+// PendingBody is one message (one entity, across all its mailboxes) that still
+// needs a body. Key is the placement the body should be fetched through: All
+// Mail when the message is there, otherwise another placement.
 type PendingBody struct {
 	Key  MessageKey
+	MID  string
 	Date time.Time
 }
 
-// PendingCursor marks a position in PendingBodies. The order is
-// (Date, Mailbox, UIDValidity, UID) descending, so the cursor is the last
-// message of the previous page.
+// PendingCursor marks a position in PendingBodies. The order is (Date, MID)
+// descending, so the cursor is the last message of the previous page.
 type PendingCursor struct {
 	Date time.Time
-	Key  MessageKey
+	MID  string
+}
+
+// Placement is one mailbox membership of a message: where it is, and under
+// which UID. A message has one placement per mailbox it is in (folder and
+// labels included).
+type Placement struct {
+	Mailbox     string
+	Kind        model.MailboxKind
+	DisplayName string
+	UIDValidity uint32
+	UID         uint32
 }
 
 // FlagUpdate sets the flags of one cached message.
@@ -130,21 +146,27 @@ type Store interface {
 	GetSyncState(ctx context.Context, account string) ([]MailboxState, error)
 	// MarkSynced records that a sync of mailbox completed at at.
 	MarkSynced(ctx context.Context, account, mailbox string, at time.Time) error
-	// PurgeMailbox deletes every cached message (and body) of the mailbox and
-	// resets its HighestUID and LastSync. The UIDVALIDITY is kept.
+	// PurgeMailbox deletes the placements of the mailbox, then every message and
+	// body that is left with no placement, and resets its HighestUID, LastSync
+	// and Unseen. The UIDVALIDITY is kept.
 	PurgeMailbox(ctx context.Context, account, mailbox string) error
+	// SetUnseen records the unseen count of a mailbox, computed by the caller
+	// from its listing.
+	SetUnseen(ctx context.Context, account, mailbox string, unseen uint32) error
 
 	// CachedUIDs returns the cached UIDs of one mailbox epoch, ascending.
 	CachedUIDs(ctx context.Context, account, mailbox string, uidValidity uint32) ([]uint32, error)
 	// CachedFlags returns the cached flags of one mailbox epoch, by UID.
 	CachedFlags(ctx context.Context, account, mailbox string, uidValidity uint32) (map[uint32][]string, error)
-	// UpsertHeaders stores headers in one transaction. An existing row is
-	// replaced but keeps its body state. Headers for an epoch other than the
-	// mailbox's current UIDVALIDITY are rejected.
+	// UpsertHeaders stores headers in one transaction: the message (keyed by
+	// InternalID, or a synthetic id when it is empty) and its placement in the
+	// header's mailbox. An existing message keeps its body state. Headers for an
+	// epoch other than the mailbox's current UIDVALIDITY are rejected.
 	UpsertHeaders(ctx context.Context, account string, headers []model.MessageHeader) error
-	// DeleteMissing deletes the cached messages of one epoch whose UIDs are not
-	// in keep. Deletes run in transactions of at most 1000 rows each. It returns
-	// the number of deleted messages.
+	// DeleteMissing removes the placements of one epoch whose UIDs are not in
+	// keep, then the messages that are left with no placement. Deletes run in
+	// transactions of at most 1000 rows each. It returns the number of removed
+	// placements.
 	DeleteMissing(ctx context.Context, account, mailbox string, uidValidity uint32, keep []uint32) (int, error)
 	// UpdateFlags sets the flags of the listed messages of one epoch in one
 	// transaction. Unknown UIDs are ignored.
@@ -161,15 +183,19 @@ type Store interface {
 	GetBody(ctx context.Context, key MessageKey) (Body, error)
 	// MarkBodyFailed records one failed body fetch for a message.
 	MarkBodyFailed(ctx context.Context, key MessageKey) error
-	// PendingBodies returns up to limit messages of the account that have no
-	// body and fewer than MaxBodyAttempts failures, newest first. Pass the last
-	// message of the previous page as after (nil for the first page). Paging
-	// with a cursor means a message that failed in this run is not offered
-	// again in the same run.
+	// PendingBodies returns up to limit messages (entities) of the account that
+	// have no body and fewer than MaxBodyAttempts failures, newest first. Each is
+	// returned with the placement to fetch it through. Pass the last message of
+	// the previous page as after (nil for the first page). Paging with a cursor
+	// means a message that failed in this run is not offered again in the same
+	// run.
 	PendingBodies(ctx context.Context, account string, after *PendingCursor, limit int) ([]PendingBody, error)
 
 	// Counts returns the message and body counts of every mailbox of the account.
 	Counts(ctx context.Context, account string) ([]MailboxCounts, error)
+	// MembershipOf returns every placement of the message that the key points
+	// at: its folder and labels. ErrNotFound if the key has no placement.
+	MembershipOf(ctx context.Context, key MessageKey) ([]Placement, error)
 	// CacheStats returns the on-disk size and the message and body totals of
 	// the account. It only reads: it does not scan rows (see sqlite.go).
 	CacheStats(ctx context.Context, account string) (CacheStats, error)

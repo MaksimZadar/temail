@@ -163,9 +163,9 @@ The bound methods are:
 | `SetupService` | `ProbeCert()` | Shows the fingerprint and subject that Bridge presents. No login, no pin |
 | `SetupService` | `TrustCert(fingerprint, replace)` | Pins the fingerprint only if a fresh probe gives the same value. If the account already has a different pin, `replace` must be true (else `already_pinned`). The config is re-read after the probe; a changed host, port, TLS mode or ID refuses the pin. Restarts sync |
 | `SetupService` | `TestConnection()` | Logs in and out (read-only). Returns a category: `ok`, `not_configured`, `no_password`, `keyring_unavailable`, `bridge_unreachable`, `untrusted_cert`, `cert_mismatch`, `auth_failed`, `invalid_config` or `other` |
-| `MailService` | `ListMailboxes()` | Mailbox list from the cache, with counts and last sync time |
+| `MailService` | `ListMailboxes()` | Mailbox list from the cache, with counts, `unseen` and last sync time |
 | `MailService` | `CacheInfo()` | Local cache size for the footer: `{bytes, messages, bodies}` as `CacheInfoDTO`. `bytes` is the size on disk of the database plus its `-wal` and `-shm` files. `messages` and `bodies` count the configured account's rows. Read-only, no connection to Bridge, cheap enough to poll during a sync |
-| `MailService` | `ListMessages(mailbox, cursor, limit)` | One page of cached headers, newest first. Keyset cursor |
+| `MailService` | `ListMessages(mailbox, cursor, limit)` | One page of cached headers, newest first. Keyset cursor. Each message carries `mailboxes` (its folder and labels) and its Proton `internalId` |
 | `MailService` | `GetMessage(mailbox, uidValidity, uid)` | Cached message (text, sanitised HTML, attachment metadata). Fetched from Bridge and cached if the body is missing |
 | `MailService` | `GetAttachment(mailbox, uidValidity, uid, partID)` | Attachment bytes, fetched on demand. Limited to 10 MiB. Returned to the frontend, never written to disk |
 | `SyncService` | `Start()` | Starts a sync if none is running. Refuses until an account is configured, pinned and has a password |
@@ -294,13 +294,27 @@ against this section and §3.2.
     `All Mail`. `All Mail` is read-only for moves.
 - Folder names are read from the server listing, never hard-coded beyond the
   system folders above.
-- **Message identity.** IMAP UIDs are only meaningful within one UIDVALIDITY
-  epoch. The cache is keyed by `(mailbox, UIDVALIDITY, UID)`. When the server
-  reports a changed UIDVALIDITY, the cache for that mailbox is discarded and
-  rebuilt; it is not remapped silently.
-- **Stable id for undo.** The audit log stores a stable message id: the
-  `Message-ID` header, or Proton's internal-ID header when Bridge exposes it.
-  Undo finds the message by that id, so it still works after a UIDVALIDITY reset.
+- **Message identity (membership model, schema v3).** Bridge gives the same
+  message a different UID in every mailbox it is in. So a message is one entity
+  keyed by the Proton internal id, and each mailbox it is in is a *placement*
+  keyed by `(mailbox, UIDVALIDITY, UID)`. The internal id comes from the
+  `X-Pm-Internal-Id` header, or from a `Message-ID` of the form
+  `<id@protonmail.internalid>`. When neither is present, the message gets a
+  synthetic id unique to its placement, and it is marked non-canonical, so two
+  such messages never merge.
+- **Folder and labels.** A message's membership is the set of placements it
+  has. `Folders/X` and `Labels/X` are placements, and so is the system folder
+  (`INBOX`, `Sent`, and so on). `All Mail` is one more placement, and it holds
+  every message, including those in Trash. It is synced first when present.
+- **Flags are global per message** (`\Seen`, `\Flagged`). `\Deleted` is per
+  placement and is not stored. Bodies are stored once per message.
+- When the server reports a changed UIDVALIDITY, the placements of that mailbox
+  are discarded and rebuilt. Messages that have no placement left are removed,
+  and the rest are kept. Nothing is remapped silently.
+- **Stable id for undo.** The audit log stores the Proton internal id (the
+  message entity key described above). Undo finds the message by that id, so it
+  still works after a UIDVALIDITY reset. The `Message-ID` header is kept, but it
+  is not the key, because it is not always present or unique.
 
 ## 7. Local cache and storage *(implemented in lane 3: `internal/store`, `internal/sync`; see their READMEs)*
 
@@ -317,11 +331,17 @@ against this section and §3.2.
   - `audit.db`: the audit log only. It is kept in a separate file so that
     clearing the cache never removes it. It must survive cache resets. Not
     built yet.
-- **Sync** (`internal/sync`): mailboxes, then headers newest first in windows of
-  200 UIDs, each committed before the next, then reconcile (server deletions and
-  flags), then bodies newest first with a delay between fetches. A cached UID is
-  never fetched again, so an interrupted run resumes without refetching. The
-  sync never writes to the mailbox.
+- **Sync** (`internal/sync`): mailboxes in priority order (All Mail, then the
+  system folders, then folders, labels, and the rest; Recovered Messages last),
+  headers newest first in windows of 200 UIDs, each committed before the next,
+  then reconcile (server deletions, flags, and the unseen count), then bodies
+  newest first with a delay between fetches. A body is fetched once per message,
+  through All Mail when it has a placement there. A cached placement UID is never
+  fetched again, so an interrupted run resumes without refetching. The sync never
+  writes to the mailbox.
+- **Existing caches resync once.** Schema v3 drops messages and bodies and resets
+  the sync state. Mailboxes stay. The cache is disposable, so the next sync
+  rebuilds it. Bodies are fetched again, one per message.
 - Cache files hold mail content, so they are created with 0600 permissions on
   Linux and under a user-only ACL on Windows. The directory is created with 0700.
   The Windows ACL is not set by code yet; it relies on the user profile.

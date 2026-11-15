@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/MaksimZadar/temail/internal/mail"
@@ -273,6 +274,20 @@ func (s *Syncer) syncMailbox(ctx context.Context, box model.Mailbox, res *Result
 
 	// Step 3: reconcile against the listing taken at the start of this pass.
 	s.emitMailbox(StateReconciling, box.Name, pending, pending, 0, 0)
+	if err := s.reconcileMailbox(ctx, box, epoch, serverUIDs, listing, res); err != nil {
+		return err
+	}
+	if err := s.store.MarkSynced(ctx, s.opts.Account, box.Name, time.Now()); err != nil {
+		return fmt.Errorf("record sync of %s: %w", box.Name, err)
+	}
+	return nil
+}
+
+// reconcileMailbox removes placements the server no longer has, copies the
+// server's flags, and records the unseen count of the mailbox. Flags are global
+// per message, so the write goes to the message through this placement.
+func (s *Syncer) reconcileMailbox(ctx context.Context, box model.Mailbox, epoch uint32,
+	serverUIDs []uint32, listing mail.UIDListing, res *Result) error {
 	deleted, err := s.store.DeleteMissing(ctx, s.opts.Account, box.Name, epoch, serverUIDs)
 	if err != nil {
 		return fmt.Errorf("remove deleted messages of %s: %w", box.Name, err)
@@ -294,19 +309,67 @@ func (s *Syncer) syncMailbox(ctx context.Context, box model.Mailbox, res *Result
 	if err := s.store.UpdateFlags(ctx, s.opts.Account, box.Name, epoch, updates); err != nil {
 		return fmt.Errorf("update flags of %s: %w", box.Name, err)
 	}
-	if err := s.store.MarkSynced(ctx, s.opts.Account, box.Name, time.Now()); err != nil {
-		return fmt.Errorf("record sync of %s: %w", box.Name, err)
+	var unseen uint32
+	for _, m := range listing.Messages {
+		if !slices.Contains(m.Flags, `\Seen`) {
+			unseen++
+		}
+	}
+	if err := s.store.SetUnseen(ctx, s.opts.Account, box.Name, unseen); err != nil {
+		return fmt.Errorf("record unseen count of %s: %w", box.Name, err)
 	}
 	return nil
 }
 
-// orderMailboxes puts INBOX first and sorts the rest by name.
+// Priority groups for mailbox order. All Mail holds every message, so syncing
+// it first gives every message its identity and its body early. Then the system
+// folders the user reads most, then folders, then labels, then everything else.
+// Recovered Messages comes last. See orderMailboxes.
+const (
+	prioAllMail = iota
+	prioSystem
+	prioFolder
+	prioLabel
+	prioOther
+	prioRecovered
+)
+
+// systemOrder ranks the system mailboxes inside prioSystem.
+var systemOrder = map[string]int{
+	"INBOX": 0, "Drafts": 1, "Sent": 2, "Archive": 3, "Spam": 4, "Trash": 5, "Starred": 6,
+}
+
+// priorityOf returns the sync priority group of a mailbox.
+func priorityOf(b model.Mailbox) int {
+	switch {
+	case b.Name == "All Mail":
+		return prioAllMail
+	case b.Name == "Recovered Messages":
+		return prioRecovered
+	case b.Kind == model.KindFolder && strings.HasPrefix(b.Name, "Folders/"):
+		return prioFolder
+	case b.Kind == model.KindLabel && strings.HasPrefix(b.Name, "Labels/"):
+		return prioLabel
+	}
+	if _, ok := systemOrder[b.Name]; ok {
+		return prioSystem
+	}
+	return prioOther
+}
+
+// orderMailboxes sorts by priority, then by the system order, then by name. If
+// All Mail is hidden in Bridge, it is simply absent and the rest is unchanged.
 func orderMailboxes(boxes []model.Mailbox) []model.Mailbox {
 	out := append([]model.Mailbox(nil), boxes...)
 	sort.SliceStable(out, func(i, j int) bool {
-		ai, aj := out[i].Name == "INBOX", out[j].Name == "INBOX"
-		if ai != aj {
-			return ai
+		pi, pj := priorityOf(out[i]), priorityOf(out[j])
+		if pi != pj {
+			return pi < pj
+		}
+		if pi == prioSystem {
+			if oi, oj := systemOrder[out[i].Name], systemOrder[out[j].Name]; oi != oj {
+				return oi < oj
+			}
 		}
 		return out[i].Name < out[j].Name
 	})

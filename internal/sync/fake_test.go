@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	gosync "sync"
 	"time"
 
@@ -15,6 +16,9 @@ import (
 
 // fakeMsg is one message on the fake server.
 type fakeMsg struct {
+	// pmid is the Proton internal id shared by every copy of the message across
+	// mailboxes. Empty means the message has no identity header.
+	pmid    string
 	subject string
 	flags   []string
 	date    time.Time
@@ -60,6 +64,12 @@ type fakeBridge struct {
 	bodyFetch    map[string]int
 	bodyAttempts map[string]int
 
+	// bodyFetchByPMID counts successful body fetches per Proton id, so a test
+	// can assert that a message's body is fetched once across its copies.
+	bodyFetchByPMID map[string]int
+	// statusCalls counts STATUS requests.
+	statusCalls int
+
 	// Hooks run after the connection check, outside the lock.
 	onHeaders func(rng mail.UIDRange)
 	onBody    func(mailbox string, uid uint32)
@@ -67,13 +77,14 @@ type fakeBridge struct {
 
 func newFakeBridge() *fakeBridge {
 	b := &fakeBridge{
-		boxes:        map[string]*fakeBox{},
-		headerFetch:  map[string]int{},
-		bodyFetch:    map[string]int{},
-		bodyAttempts: map[string]int{},
-		bodyErr:      map[string]error{},
-		mailboxErr:   map[string]error{},
-		zeroValidity: map[string]bool{},
+		boxes:           map[string]*fakeBox{},
+		headerFetch:     map[string]int{},
+		bodyFetch:       map[string]int{},
+		bodyAttempts:    map[string]int{},
+		bodyErr:         map[string]error{},
+		mailboxErr:      map[string]error{},
+		zeroValidity:    map[string]bool{},
+		bodyFetchByPMID: map[string]int{},
 	}
 	b.addBox("INBOX", model.KindInbox, 1)
 	return b
@@ -103,6 +114,59 @@ func (b *fakeBridge) appendMsg(mailbox string, flags ...string) uint32 {
 	return uid
 }
 
+// appendShared adds a message with a Proton id to mailbox, with the given flags,
+// and returns its UID. Copies made with copyTo share the id.
+func (b *fakeBridge) appendShared(mailbox, pmid string, flags ...string) uint32 {
+	uid := b.appendMsg(mailbox, flags...)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.boxes[mailbox].msgs[uid].pmid = pmid
+	return uid
+}
+
+// copyTo puts another copy of the message with Proton id pmid into mailbox, as
+// Bridge does for a label or a folder. The copy has its own UID there.
+func (b *fakeBridge) copyTo(mailbox, pmid string) uint32 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var src *fakeMsg
+	for _, box := range b.boxes {
+		for _, m := range box.msgs {
+			if m.pmid == pmid {
+				src = m
+			}
+		}
+	}
+	box := b.boxes[mailbox]
+	uid := box.next
+	box.next++
+	cp := *src
+	cp.flags = append([]string(nil), src.flags...)
+	box.msgs[uid] = &cp
+	return uid
+}
+
+// pmidFlagsSet sets the flags of every copy of pmid, because \Seen and \Flagged
+// are global per message.
+func (b *fakeBridge) setSharedFlags(pmid string, flags ...string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, box := range b.boxes {
+		for _, m := range box.msgs {
+			if m.pmid == pmid {
+				m.flags = flags
+			}
+		}
+	}
+}
+
+// bodyFetchesOf counts successful body fetches of a Proton id.
+func (b *fakeBridge) bodyFetchesOf(pmid string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.bodyFetchByPMID[pmid]
+}
+
 func (b *fakeBridge) expunge(mailbox string, uid uint32) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -112,7 +176,18 @@ func (b *fakeBridge) expunge(mailbox string, uid uint32) {
 func (b *fakeBridge) setFlags(mailbox string, uid uint32, flags ...string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.boxes[mailbox].msgs[uid].flags = flags
+	m := b.boxes[mailbox].msgs[uid]
+	if m.pmid == "" {
+		m.flags = flags
+		return
+	}
+	for _, box := range b.boxes {
+		for _, c := range box.msgs {
+			if c.pmid == m.pmid {
+				c.flags = flags
+			}
+		}
+	}
 }
 
 // recreate empties a mailbox and gives it a new UIDVALIDITY, as Bridge does
@@ -181,6 +256,32 @@ func (b *fakeBridge) MailboxInfo(ctx context.Context, mailbox string) (mail.Mail
 	return mail.MailboxInfo{}, errors.New("not used by sync")
 }
 
+// Status implements mail.Client. The fake answers from its own state.
+func (b *fakeBridge) Status(ctx context.Context, mailbox string) (mail.MailboxStatus, error) {
+	if err := b.gate(ctx); err != nil {
+		return mail.MailboxStatus{}, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.statusCalls++
+	box, ok := b.boxes[mailbox]
+	if !ok {
+		return mail.MailboxStatus{}, fmt.Errorf("no mailbox %s", mailbox)
+	}
+	st := mail.MailboxStatus{Name: mailbox, UIDValidity: box.validity, UIDNext: box.next, Messages: uint32(len(box.msgs))}
+	for _, m := range box.msgs {
+		if !slices.Contains(m.flags, `\Seen`) {
+			st.Unseen++
+		}
+	}
+	return st, nil
+}
+
+// Capabilities implements mail.Client. The fake reports the Bridge set.
+func (b *fakeBridge) Capabilities() []string {
+	return []string{"ID", "IDLE", "IMAP4REV1", "MOVE", "STARTTLS", "UIDPLUS", "UNSELECT"}
+}
+
 func (b *fakeBridge) FetchHeaders(ctx context.Context, mailbox string, rng mail.UIDRange) ([]model.MessageHeader, error) {
 	if err := b.gate(ctx); err != nil {
 		return nil, err
@@ -205,13 +306,17 @@ func (b *fakeBridge) FetchHeaders(ctx context.Context, mailbox string, rng mail.
 			continue
 		}
 		b.headerFetch[fmt.Sprintf("%s:%d", mailbox, uid)]++
-		out = append(out, model.MessageHeader{
+		h := model.MessageHeader{
 			Mailbox: mailbox, UIDValidity: box.validity, UID: uid,
 			MessageID: fmt.Sprintf("<%s-%d@example.org>", mailbox, uid),
 			Subject:   m.subject, Date: m.date,
 			From:  []model.Address{{Email: "a@example.org"}},
 			Flags: append([]string(nil), m.flags...),
-		})
+		}
+		if m.pmid != "" {
+			h.InternalID, h.Canonical = m.pmid, true
+		}
+		out = append(out, h)
 	}
 	return out, nil
 }
@@ -263,6 +368,9 @@ func (b *fakeBridge) FetchMessage(ctx context.Context, mailbox string, uid uint3
 	}
 	b.bodyFetch[key]++
 	b.bodyOrder = append(b.bodyOrder, key)
+	if m.pmid != "" {
+		b.bodyFetchByPMID[m.pmid]++
+	}
 	return model.Message{
 		MessageHeader: model.MessageHeader{
 			Mailbox: mailbox, UIDValidity: box.validity, UID: uid, Subject: m.subject, Date: m.date,

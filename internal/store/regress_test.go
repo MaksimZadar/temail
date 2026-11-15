@@ -106,7 +106,7 @@ func TestUpgradeFromV1(t *testing.T) {
 	if err := s.(*sqliteStore).db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'messages_body_pending'`).Scan(&idx); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(idx, "mailbox DESC") {
+	if !strings.Contains(idx, "mid DESC") {
 		t.Errorf("body index not upgraded: %s", idx)
 	}
 }
@@ -224,7 +224,7 @@ func TestPendingBodiesCursorPagesOnce(t *testing.T) {
 			seen = append(seen, p.Key.UID)
 		}
 		last := page[len(page)-1]
-		cur = &PendingCursor{Date: last.Date, Key: last.Key}
+		cur = &PendingCursor{Date: last.Date, MID: last.MID}
 	}
 	if !reflect.DeepEqual(seen, []uint32{5, 4, 3, 2, 1}) {
 		t.Errorf("cursor paging visited %v", seen)

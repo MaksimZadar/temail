@@ -73,7 +73,10 @@ type MailboxDTO struct {
 	UIDValidity uint32            `json:"uidValidity"`
 	Messages    int               `json:"messages"`
 	Bodies      int               `json:"bodies"`
-	LastSync    *time.Time        `json:"lastSync"`
+	// Unseen is the number of messages in this mailbox without \Seen, from its
+	// last sync. 0 until the mailbox has synced.
+	Unseen   uint32     `json:"unseen"`
+	LastSync *time.Time `json:"lastSync"`
 }
 
 // PageCursor marks the position after the last message of a page. Send it
@@ -213,6 +216,7 @@ func (m *MailService) ListMailboxes(ctx context.Context) ([]MailboxDTO, error) {
 			UIDValidity: s.UIDValidity,
 			Messages:    byName[s.Name].Messages,
 			Bodies:      byName[s.Name].Bodies,
+			Unseen:      s.Unseen,
 		}
 		if !s.LastSync.IsZero() {
 			t := s.LastSync
@@ -257,6 +261,11 @@ func (m *MailService) ListMessages(ctx context.Context, mailbox string, cursor *
 	headers, err := m.st.ListMessages(ctx, acct, mailbox, opts)
 	if err != nil {
 		return MessagePage{}, fmt.Errorf("read messages: %w", err)
+	}
+	for i := range headers {
+		if err := m.fillMailboxes(ctx, acct, &headers[i]); err != nil {
+			return MessagePage{}, err
+		}
 	}
 	if headers == nil {
 		headers = []model.MessageHeader{}
@@ -360,6 +369,9 @@ func (m *MailService) loadMessage(ctx context.Context, mailbox string, uidValidi
 		return model.Message{}, fmt.Errorf("read message: %w", err)
 	}
 
+	if err := m.fillMailboxes(ctx, acct, &hdr); err != nil {
+		return model.Message{}, err
+	}
 	body, err := m.st.GetBody(ctx, key)
 	if err == nil {
 		return model.Message{
@@ -412,6 +424,26 @@ func (m *MailService) accountID() (string, error) {
 		return "", err
 	}
 	return cfg.Bridge[idx].ID, nil
+}
+
+// fillMailboxes sets h.Mailboxes to every mailbox the message is in (its folder
+// and labels), from the cache. The placement key of h identifies the message.
+func (m *MailService) fillMailboxes(ctx context.Context, acct string, h *model.MessageHeader) error {
+	key := store.MessageKey{Account: acct, Mailbox: h.Mailbox, UIDValidity: h.UIDValidity, UID: h.UID}
+	places, err := m.st.MembershipOf(ctx, key)
+	if errors.Is(err, store.ErrNotFound) {
+		h.Mailboxes = []model.MailboxRef{}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read membership: %w", err)
+	}
+	refs := make([]model.MailboxRef, 0, len(places))
+	for _, p := range places {
+		refs = append(refs, model.MailboxRef{Name: p.Mailbox, DisplayName: p.DisplayName, Kind: p.Kind})
+	}
+	h.Mailboxes = refs
+	return nil
 }
 
 // checkEpoch fails if the server's UIDVALIDITY for mailbox is not epoch.

@@ -3,6 +3,39 @@
 Copies mail from Proton Bridge into the cache (`internal/store`). It uses the
 read-only `internal/mail` client and has no UI, Wails or LLM knowledge.
 
+## Membership model
+
+Bridge gives one message a different UID in every mailbox it is in, so the sync
+works in two layers:
+
+- **Placements.** Every mailbox is listed and its headers are fetched, so each
+  copy becomes a placement (`mailbox`, `UIDVALIDITY`, `UID`) on a message. The
+  message key is the Proton internal id (`X-Pm-Internal-Id`, or a
+  `<id@protonmail.internalid>` Message-ID). This is what makes folder and labels
+  visible.
+- **Bodies, once per message.** The body queue is per message. A message is
+  fetched through its All Mail placement when it has one, and through any other
+  placement otherwise. Recovered Messages alone is skipped.
+
+**Priority order** (`orderMailboxes`): All Mail first, since it holds every
+message; then INBOX, Drafts, Sent, Archive, Spam, Trash and Starred; then
+`Folders/*`; then `Labels/*`; then any other mailbox; then Recovered Messages.
+If All Mail is hidden in Bridge, it is absent from the list and the others sync
+the same way.
+
+**Reconcile per mailbox** removes placements the server no longer lists. Deleting
+the last placement of a message removes the message and its body. A message that
+is still in another mailbox stays. Flags are global, so reconcile writes them to
+the message. The unseen count of the mailbox is stored from its listing
+(`SetUnseen`), so it costs no extra request.
+
+**Progress.** Mailbox progress is unchanged in shape. Body progress counts
+messages (entities), so the totals are cached messages and cached bodies.
+
+**Known gap.** A placement whose UID is reused with another message (not seen
+in practice, since UIDs only grow within an epoch) would leave the old message
+without a placement until a later purge. Nothing else depends on it.
+
 ## Guarantees
 
 - **Read-only on the mailbox.** The sync calls only `ListMailboxes`,
@@ -21,8 +54,8 @@ read-only `internal/mail` client and has no UI, Wails or LLM knowledge.
 
 1. **Mailboxes.** `ListMailboxes`, then `UpsertMailboxes`. If a UIDVALIDITY
    changed, the store purges that mailbox in the same transaction. Mailboxes
-   the server no longer lists are removed with `DeleteMailboxesNotIn`. INBOX
-   comes first.
+   the server no longer lists are removed with `DeleteMailboxesNotIn`. The
+   order is the priority order below.
 2. **Headers, per mailbox.**
    - `ListUIDs` gives the server's UIDs, UIDVALIDITY and flags, in one pass.
      This is the listing for steps 2 and 3.
@@ -142,6 +175,12 @@ extra logic, and it costs one `ListUIDs` and one local read per mailbox. The
   implemented.
 
 ## Tests
+
+`membership_test.go` covers one message in All Mail, INBOX and a label (one
+entity, one body fetch, the membership, the global flags), deletion of one copy,
+UIDVALIDITY of one mailbox leaving shared messages alone, the priority order,
+hidden All Mail, Recovered Messages bodies being skipped, unseen per mailbox, and
+resume with one body per message.
 
 `sync_test.go` runs against an in-memory fake `mail.Client` (`fake_test.go`)
 and a real SQLite cache in `t.TempDir()`. The fake records every fetch by

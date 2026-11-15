@@ -22,16 +22,15 @@ import (
 //   - anything else (a server NO or BAD during Bridge startup, unknown errors):
 //     skipped and not counted, so a transient problem cannot blank a body.
 func (s *Syncer) syncBodies(ctx context.Context, res *Result) error {
-	counts, err := s.store.Counts(ctx, s.opts.Account)
+	// Progress counts messages (entities), not placements: one body serves every
+	// mailbox the message is in. The totals come from the store once, and then
+	// move with the fetches of this run.
+	st, err := s.store.CacheStats(ctx, s.opts.Account)
 	if err != nil {
 		return fmt.Errorf("count cached messages: %w", err)
 	}
-	done := make(map[string]int, len(counts))
-	total := make(map[string]int, len(counts))
-	for _, c := range counts {
-		done[c.Mailbox] = c.Bodies
-		total[c.Mailbox] = c.Messages
-	}
+	done := int(st.Bodies)
+	total := int(st.Messages)
 	s.emit(Progress{Account: s.opts.Account, State: StateBodies})
 
 	var cur *store.PendingCursor
@@ -46,7 +45,7 @@ func (s *Syncer) syncBodies(ctx context.Context, res *Result) error {
 		}
 		for _, pb := range page {
 			key := pb.Key
-			cur = &store.PendingCursor{Date: pb.Date, Key: key}
+			cur = &store.PendingCursor{Date: pb.Date, MID: pb.MID}
 
 			if fetchedAny {
 				if err := s.sleep(ctx, s.opts.BodyDelay); err != nil {
@@ -90,8 +89,8 @@ func (s *Syncer) syncBodies(ctx context.Context, res *Result) error {
 				return fmt.Errorf("cache body of UID %d in %s: %w", key.UID, key.Mailbox, err)
 			}
 			res.BodiesFetched++
-			done[key.Mailbox]++
-			s.emitMailbox(StateBodies, key.Mailbox, 0, 0, done[key.Mailbox], total[key.Mailbox])
+			done++
+			s.emitMailbox(StateBodies, key.Mailbox, 0, 0, done, total)
 		}
 	}
 }

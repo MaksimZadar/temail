@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -206,6 +207,51 @@ func (c *imapClient) ListMailboxes(ctx context.Context) ([]model.Mailbox, error)
 		out = append(out, mb)
 	}
 	return out, nil
+}
+
+// Status implements Client. It sends STATUS only, never SELECT or EXAMINE.
+func (c *imapClient) Status(ctx context.Context, mailbox string) (MailboxStatus, error) {
+	cl, end, err := c.begin(ctx)
+	if err != nil {
+		return MailboxStatus{}, err
+	}
+	defer end()
+
+	data, err := cl.Status(mailbox, &imap.StatusOptions{
+		NumMessages: true,
+		UIDNext:     true,
+		UIDValidity: true,
+		NumUnseen:   true,
+	}).Wait()
+	if err != nil {
+		return MailboxStatus{}, opErr(ctx, fmt.Errorf("status of %s: %w", mailbox, err))
+	}
+	out := MailboxStatus{Name: mailbox, UIDValidity: data.UIDValidity, UIDNext: uint32(data.UIDNext)}
+	if data.NumMessages != nil {
+		out.Messages = *data.NumMessages
+	}
+	if data.NumUnseen != nil {
+		out.Unseen = *data.NumUnseen
+	}
+	return out, nil
+}
+
+// Capabilities implements Client. It reads the capability set the client keeps
+// from the greeting and the login. It sends nothing.
+func (c *imapClient) Capabilities() []string {
+	c.mu.Lock()
+	cl := c.cl
+	c.mu.Unlock()
+	if cl == nil {
+		return nil
+	}
+	caps := cl.Caps()
+	out := make([]string, 0, len(caps))
+	for name := range caps {
+		out = append(out, strings.ToUpper(string(name)))
+	}
+	slices.Sort(out)
+	return out
 }
 
 // MailboxInfo implements Client.

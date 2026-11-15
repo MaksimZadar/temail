@@ -104,6 +104,14 @@ running, and its result is cached for 30 s.
   4.3 ms best case. Nothing is cached, so no counter can drift. It never connects
   to Bridge. With no configured account, the counts are 0 and the bytes are still
   reported.
+- **Membership (additive DTO fields, phase P4).** `MailboxDTO` gains `unseen`
+  (the mailbox's unseen count from its last sync). Each message in `ListMessages`
+  and `GetMessage` gains `mailboxes`: every mailbox it is in (folder and labels),
+  each as `{name, displayName, kind}`. `internalId` and `canonical` are the
+  Proton identity. `GetMessage(mailbox, uidValidity, uid)` still resolves by
+  placement. The body is shared by all placements of a message. Membership is
+  read with one indexed query per listed message, so a page costs
+  `limit` extra small queries.
 - `ListMailboxes()` and `ListMessages(mailbox, cursor, limit)` read only the
   cache. They never connect. `limit` defaults to 50 and is capped at
   `store.MaxListLimit`. A full page returns a `next` cursor, and a short page
@@ -245,6 +253,9 @@ after the hook runs.
   the concurrency test above; the confirmation (confirmed, declined, dialog error,
   no dialog, edit, disable, kind change, the transition table); no key in any
   error.
+- `mail_test.go` (membership): a listed message carries its three mailboxes,
+  `GetMessage` carries them with the body, and the JSON uses the new camelCase
+  fields. `ListMailboxes` carries `unseen`.
 - `llm_test.go`: the DTO has no key and uses camelCase JSON; save validation
   writes nothing; create keeps the key out of `config.json`; an empty key keeps the
   stored one; a changed base URL needs a new key; keyring and config failures

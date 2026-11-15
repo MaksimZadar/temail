@@ -53,6 +53,7 @@ CREATE TABLE bodies (
 );
 `,
 	schemaV2,
+	schemaV3,
 }
 
 // v2: the body queue index follows the cursor order used by PendingBodies.
@@ -62,6 +63,61 @@ const schemaV2 = `
 DROP INDEX messages_body_pending;
 CREATE INDEX messages_body_pending ON messages
 	(account, date DESC, mailbox DESC, uidvalidity DESC, uid DESC) WHERE body_state = 'none';
+`
+
+// v3: one message entity per Proton internal id, with placements per mailbox.
+// The cache is disposable, so messages and bodies are dropped and the sync state
+// is reset. Every existing cache resyncs once after this migration. Mailboxes
+// are kept. Their unseen count starts at 0 and is set by the next reconcile.
+const schemaV3 = `
+DROP TABLE bodies;
+DROP TABLE messages;
+
+CREATE TABLE messages (
+	account       TEXT    NOT NULL,
+	mid           TEXT    NOT NULL,
+	canonical     INTEGER NOT NULL DEFAULT 1 CHECK (canonical IN (0, 1)),
+	message_id    TEXT    NOT NULL DEFAULT '',
+	subject       TEXT    NOT NULL DEFAULT '',
+	from_json     TEXT    NOT NULL DEFAULT '[]',
+	to_json       TEXT    NOT NULL DEFAULT '[]',
+	date          INTEGER NOT NULL DEFAULT 0,
+	flags         TEXT    NOT NULL DEFAULT '[]',
+	in_reply_to   TEXT    NOT NULL DEFAULT '',
+	refs          TEXT    NOT NULL DEFAULT '',
+	body_state    TEXT    NOT NULL DEFAULT 'none' CHECK (body_state IN ('none', 'cached')),
+	body_attempts INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (account, mid)
+);
+
+CREATE TABLE placements (
+	account     TEXT    NOT NULL,
+	mailbox     TEXT    NOT NULL,
+	uidvalidity INTEGER NOT NULL,
+	uid         INTEGER NOT NULL,
+	mid         TEXT    NOT NULL,
+	PRIMARY KEY (account, mailbox, uidvalidity, uid),
+	FOREIGN KEY (account, mailbox) REFERENCES mailboxes (account, name) ON DELETE CASCADE,
+	FOREIGN KEY (account, mid) REFERENCES messages (account, mid)
+);
+
+CREATE INDEX placements_mid ON placements (account, mid);
+CREATE INDEX messages_date ON messages (account, date DESC, mid DESC);
+CREATE INDEX messages_body_pending ON messages (account, date DESC, mid DESC)
+	WHERE body_state = 'none';
+
+CREATE TABLE bodies (
+	account               TEXT NOT NULL,
+	mid                   TEXT NOT NULL,
+	text_gz               BLOB,
+	html_gz               BLOB,
+	attachments_meta_json TEXT NOT NULL DEFAULT '[]',
+	PRIMARY KEY (account, mid),
+	FOREIGN KEY (account, mid) REFERENCES messages (account, mid) ON DELETE CASCADE
+);
+
+ALTER TABLE mailboxes ADD COLUMN unseen INTEGER NOT NULL DEFAULT 0;
+UPDATE mailboxes SET highest_uid = 0, last_sync = 0;
 `
 
 // SchemaVersion is the schema version this build writes.
