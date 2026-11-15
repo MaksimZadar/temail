@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -179,5 +181,77 @@ func TestDefaultBridgeAccount(t *testing.T) {
 	want := BridgeAccount{ID: "id", Host: "127.0.0.1", IMAPPort: 1143, SMTPPort: 1025, TLSMode: "starttls", Username: "user"}
 	if a != want {
 		t.Errorf("got %+v, want %+v", a, want)
+	}
+}
+
+func TestEffectiveKindAndEnabledDefaults(t *testing.T) {
+	on, off := true, false
+	tests := []struct {
+		name        string
+		p           LLMProvider
+		wantKind    string
+		wantEnabled bool
+	}{
+		{"loopback derives local, enabled", LLMProvider{BaseURL: "http://127.0.0.1:11434/v1"}, KindLocal, true},
+		{"localhost name is local", LLMProvider{BaseURL: "http://localhost:1234/v1"}, KindLocal, true},
+		{"remote host derives cloud, disabled", LLMProvider{BaseURL: "https://openrouter.ai/api/v1"}, KindCloud, false},
+		{"explicit cloud on loopback stays cloud", LLMProvider{Kind: KindCloud, BaseURL: "http://127.0.0.1:1/v1"}, KindCloud, false},
+		{"cloud enabled explicitly", LLMProvider{BaseURL: "https://openrouter.ai/api/v1", Enabled: &on}, KindCloud, true},
+		{"local disabled explicitly", LLMProvider{BaseURL: "http://127.0.0.1:11434/v1", Enabled: &off}, KindLocal, false},
+		{"unparseable URL is cloud", LLMProvider{BaseURL: "://bad"}, KindCloud, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.p.EffectiveKind(); got != tt.wantKind {
+				t.Fatalf("kind = %q, want %q", got, tt.wantKind)
+			}
+			if got := tt.p.IsEnabled(); got != tt.wantEnabled {
+				t.Fatalf("enabled = %v, want %v", got, tt.wantEnabled)
+			}
+		})
+	}
+}
+
+func TestLLMProviderValidationNewFields(t *testing.T) {
+	base := func(p LLMProvider) Config {
+		c := Default()
+		c.LLM.Providers = []LLMProvider{p}
+		return c
+	}
+	tests := []struct {
+		name    string
+		p       LLMProvider
+		wantErr bool
+	}{
+		{"local on loopback is fine", LLMProvider{Name: "ollama", BaseURL: "http://127.0.0.1:11434/v1", Kind: KindLocal}, false},
+		{"local label on a remote host is refused", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Kind: KindLocal}, true},
+		{"unknown kind is refused", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Kind: "remote"}, true},
+		{"negative maxContext is refused", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Capabilities: LLMCapabilities{MaxContext: -1}}, true},
+		{"capabilities and enabled are accepted", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Enabled: new(bool),
+			Capabilities: LLMCapabilities{StructuredOutput: true, Tools: true, MaxContext: 32000}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Validate(base(tt.p))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestOldConfigFileLoadsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	old := `{"version":1,"bridge":[],"llm":{"defaultProvider":"or","providers":[{"name":"or","baseURL":"https://openrouter.ai/api/v1","model":"m"}]}}`
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewManager(dir).Load()
+	if err != nil {
+		t.Fatalf("old file must still load: %v", err)
+	}
+	p := c.LLM.Providers[0]
+	if p.EffectiveKind() != KindCloud || p.IsEnabled() {
+		t.Fatalf("old cloud provider must default to disabled cloud, got kind=%s enabled=%v", p.EffectiveKind(), p.IsEnabled())
 	}
 }

@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -60,12 +61,76 @@ type LLMConfig struct {
 	Providers       []LLMProvider `json:"providers"`
 }
 
+// Provider kinds. A "cloud" provider receives content only when enabled. A
+// "local" provider runs on this machine (loopback base URL) and is enabled by
+// default.
+const (
+	KindCloud = "cloud"
+	KindLocal = "local"
+)
+
 // LLMProvider describes one LLM endpoint. The API key (if any) is not stored
 // here; it lives in the keyring under "llm:<name>" or in TEMAIL_LLM_<NAME>_KEY.
+//
+// The fields after Model are optional and were added without a schema bump, so
+// older files load unchanged:
+//   - Kind: "cloud" or "local". Empty means derived from BaseURL (loopback host
+//     is local, anything else cloud). See EffectiveKind.
+//   - Enabled: nil means the default for the kind (local on, cloud off). A
+//     cloud provider must be enabled before any content is sent to it.
+//   - Capabilities: what the endpoint supports. Unset flags mean "no".
 type LLMProvider struct {
-	Name    string `json:"name"`
-	BaseURL string `json:"baseURL"`
-	Model   string `json:"model"`
+	Name         string          `json:"name"`
+	BaseURL      string          `json:"baseURL"`
+	Model        string          `json:"model"`
+	Kind         string          `json:"kind,omitempty"`
+	Enabled      *bool           `json:"enabled,omitempty"`
+	Capabilities LLMCapabilities `json:"capabilities,omitempty"`
+}
+
+// LLMCapabilities are the structured-output features an endpoint supports.
+// MaxContext is an approximate size limit in tokens; 0 means unknown.
+type LLMCapabilities struct {
+	StructuredOutput bool `json:"structuredOutput,omitempty"`
+	Tools            bool `json:"tools,omitempty"`
+	MaxContext       int  `json:"maxContext,omitempty"`
+}
+
+// EffectiveKind returns the provider's kind. An explicit Kind wins. Otherwise a
+// loopback base URL host is local and any other host is cloud. An unparseable
+// base URL is cloud, which is the safe default.
+func (p LLMProvider) EffectiveKind() string {
+	if p.Kind != "" {
+		return p.Kind
+	}
+	if isLoopbackURL(p.BaseURL) {
+		return KindLocal
+	}
+	return KindCloud
+}
+
+// IsEnabled reports whether the provider may receive content. Cloud providers
+// are off unless Enabled is set to true. Local providers are on unless it is
+// set to false.
+func (p LLMProvider) IsEnabled() bool {
+	if p.Enabled != nil {
+		return *p.Enabled
+	}
+	return p.EffectiveKind() == KindLocal
+}
+
+// isLoopbackURL reports whether the URL's host is localhost or a loopback IP.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Default returns the configuration used when no config file exists.
@@ -155,6 +220,19 @@ func Validate(c Config) error {
 		names[p.Name] = true
 		if err := validBaseURL(p.BaseURL); err != nil {
 			add("%s: baseURL %q: %v", where, p.BaseURL, err)
+		}
+		switch p.Kind {
+		case "", KindCloud, KindLocal:
+		default:
+			add("%s: kind %q must be %q, %q or empty", where, p.Kind, KindCloud, KindLocal)
+		}
+		if p.Kind == KindLocal && !isLoopbackURL(p.BaseURL) {
+			// A "local" label on a remote host would send content off the machine
+			// with the local defaults, so refuse it.
+			add("%s: kind %q needs a loopback baseURL", where, KindLocal)
+		}
+		if p.Capabilities.MaxContext < 0 {
+			add("%s: capabilities.maxContext must not be negative", where)
 		}
 	}
 	if c.LLM.DefaultProvider != "" && !names[c.LLM.DefaultProvider] {
