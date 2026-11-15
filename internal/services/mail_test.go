@@ -344,7 +344,7 @@ func TestMessagesCarryMailboxMembership(t *testing.T) {
 	h.Canonical = true
 	fx.st.listed = []model.MessageHeader{h}
 	key := store.MessageKey{Account: "main", Mailbox: "INBOX", UIDValidity: testEpoch, UID: 4}
-	fx.st.members[key] = []store.Placement{
+	fx.st.membersByMID["pm-m"] = []store.Placement{
 		{Mailbox: "All Mail", Kind: model.KindFolder, DisplayName: "All Mail"},
 		{Mailbox: "INBOX", Kind: model.KindInbox, DisplayName: "INBOX"},
 		{Mailbox: "Labels/Work", Kind: model.KindLabel, DisplayName: "Work"},

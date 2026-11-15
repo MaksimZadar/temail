@@ -92,7 +92,10 @@ func AllUIDs() UIDRange {
 // are ascending.
 type UIDListing struct {
 	UIDValidity uint32
-	Messages    []UIDState
+	// UIDNext is the server's UIDNEXT when the mailbox was selected. It is 0
+	// when the server did not report it.
+	UIDNext  uint32
+	Messages []UIDState
 }
 
 // UIDState is one message's UID and current IMAP flags.

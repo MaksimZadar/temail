@@ -239,7 +239,7 @@ func TestUIDValidityChangePurgesMailbox(t *testing.T) {
 	if err := s.SetBody(ctx, MessageKey{acct, "INBOX", 1, 1}, Body{Text: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkSynced(ctx, acct, "INBOX", t0); err != nil {
+	if err := s.MarkSynced(ctx, acct, "INBOX", t0, 4); err != nil {
 		t.Fatal(err)
 	}
 
@@ -474,7 +474,7 @@ func TestCountsAndSyncStateAndMailboxesNotIn(t *testing.T) {
 
 func TestMarkSyncedUnknownMailbox(t *testing.T) {
 	s := openTest(t)
-	if err := s.MarkSynced(context.Background(), acct, "nope", t0); !errors.Is(err, ErrNotFound) {
+	if err := s.MarkSynced(context.Background(), acct, "nope", t0, 1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("MarkSynced unknown = %v", err)
 	}
 }

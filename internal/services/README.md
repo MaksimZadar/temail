@@ -109,9 +109,9 @@ running, and its result is cached for 30 s.
   and `GetMessage` gains `mailboxes`: every mailbox it is in (folder and labels),
   each as `{name, displayName, kind}`. `internalId` and `canonical` are the
   Proton identity. `GetMessage(mailbox, uidValidity, uid)` still resolves by
-  placement. The body is shared by all placements of a message. Membership is
-  read with one indexed query per listed message, so a page costs
-  `limit` extra small queries.
+  placement. The body is shared by all placements of a message. A list page
+  reads membership in one batched query (`MembershipOfMessages`), so a page
+  costs a fixed number of queries regardless of its size.
 - `ListMailboxes()` and `ListMessages(mailbox, cursor, limit)` read only the
   cache. They never connect. `limit` defaults to 50 and is capped at
   `store.MaxListLimit`. A full page returns a `next` cursor, and a short page

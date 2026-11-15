@@ -303,7 +303,7 @@ func (s *sqliteStore) DeleteMailboxesNotIn(ctx context.Context, account string, 
 // GetSyncState implements Store.
 func (s *sqliteStore) GetSyncState(ctx context.Context, account string) ([]MailboxState, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, kind, display_name, uidvalidity, highest_uid, last_sync, unseen
+		SELECT name, kind, display_name, uidvalidity, highest_uid, last_sync, unseen, uidnext
 		FROM mailboxes WHERE account = ? ORDER BY name`, account)
 	if err != nil {
 		return nil, err
@@ -314,7 +314,7 @@ func (s *sqliteStore) GetSyncState(ctx context.Context, account string) ([]Mailb
 		var st MailboxState
 		var kind string
 		var lastSync int64
-		if err := rows.Scan(&st.Name, &kind, &st.DisplayName, &st.UIDValidity, &st.HighestUID, &lastSync, &st.Unseen); err != nil {
+		if err := rows.Scan(&st.Name, &kind, &st.DisplayName, &st.UIDValidity, &st.HighestUID, &lastSync, &st.Unseen, &st.UIDNext); err != nil {
 			return nil, err
 		}
 		st.Kind = model.MailboxKind(kind)
@@ -325,11 +325,11 @@ func (s *sqliteStore) GetSyncState(ctx context.Context, account string) ([]Mailb
 }
 
 // MarkSynced implements Store.
-func (s *sqliteStore) MarkSynced(ctx context.Context, account, mailbox string, at time.Time) error {
+func (s *sqliteStore) MarkSynced(ctx context.Context, account, mailbox string, at time.Time, uidNext uint32) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
-			`UPDATE mailboxes SET last_sync = ? WHERE account = ? AND name = ?`,
-			toMillis(at), account, mailbox)
+			`UPDATE mailboxes SET last_sync = ?, uidnext = ? WHERE account = ? AND name = ?`,
+			toMillis(at), uidNext, account, mailbox)
 		if err != nil {
 			return err
 		}

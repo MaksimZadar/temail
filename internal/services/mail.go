@@ -262,10 +262,17 @@ func (m *MailService) ListMessages(ctx context.Context, mailbox string, cursor *
 	if err != nil {
 		return MessagePage{}, fmt.Errorf("read messages: %w", err)
 	}
+	// One membership query for the whole page, not one per row.
+	mids := make([]string, 0, len(headers))
+	for _, h := range headers {
+		mids = append(mids, h.InternalID)
+	}
+	members, err := m.st.MembershipOfMessages(ctx, acct, mids)
+	if err != nil {
+		return MessagePage{}, fmt.Errorf("read membership: %w", err)
+	}
 	for i := range headers {
-		if err := m.fillMailboxes(ctx, acct, &headers[i]); err != nil {
-			return MessagePage{}, err
-		}
+		headers[i].Mailboxes = mailboxRefs(members[headers[i].InternalID])
 	}
 	if headers == nil {
 		headers = []model.MessageHeader{}
@@ -438,12 +445,18 @@ func (m *MailService) fillMailboxes(ctx context.Context, acct string, h *model.M
 	if err != nil {
 		return fmt.Errorf("read membership: %w", err)
 	}
+	h.Mailboxes = mailboxRefs(places)
+	return nil
+}
+
+// mailboxRefs converts placements to the DTO form. It never returns nil, so the
+// JSON is an array.
+func mailboxRefs(places []store.Placement) []model.MailboxRef {
 	refs := make([]model.MailboxRef, 0, len(places))
 	for _, p := range places {
 		refs = append(refs, model.MailboxRef{Name: p.Mailbox, DisplayName: p.DisplayName, Kind: p.Kind})
 	}
-	h.Mailboxes = refs
-	return nil
+	return refs
 }
 
 // checkEpoch fails if the server's UIDVALIDITY for mailbox is not epoch.

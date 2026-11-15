@@ -277,7 +277,7 @@ func (s *Syncer) syncMailbox(ctx context.Context, box model.Mailbox, res *Result
 	if err := s.reconcileMailbox(ctx, box, epoch, serverUIDs, listing, res); err != nil {
 		return err
 	}
-	if err := s.store.MarkSynced(ctx, s.opts.Account, box.Name, time.Now()); err != nil {
+	if err := s.store.MarkSynced(ctx, s.opts.Account, box.Name, time.Now(), listing.UIDNext); err != nil {
 		return fmt.Errorf("record sync of %s: %w", box.Name, err)
 	}
 	return nil

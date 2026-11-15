@@ -64,11 +64,13 @@ this build is refused with an error. Shipped migrations are never edited.
 
 ```
 mailboxes(account, name, kind, display_name, uidvalidity,
-          highest_uid, last_sync, unseen)              PK (account, name)
+          highest_uid, last_sync, unseen, uidnext,
+          placements_count, bodies_count)              PK (account, name)
 messages(account, mid, canonical, message_id, subject,
          from_json, to_json, date, flags, in_reply_to, refs,
          body_state, body_attempts)                    PK (account, mid)
-placements(account, mailbox, uidvalidity, uid, mid)    PK (account, mailbox, uidvalidity, uid)
+placements(account, mailbox, uidvalidity, uid, mid,
+           date)                                       PK (account, mailbox, uidvalidity, uid)
                                                        FK (account, mailbox) -> mailboxes ON DELETE CASCADE
                                                        FK (account, mid)     -> messages
 bodies(account, mid, text_gz, html_gz,
@@ -84,9 +86,13 @@ Indexes:
   bodies.
 - `messages_body_pending (account, date DESC, mid DESC) WHERE body_state = 'none'`:
   the body queue, one row per message.
+- `placements_list (account, mailbox, uidvalidity, date DESC, uid DESC)`: the
+  mailbox page. `placements.date` is a copy of the message date, so a page is read
+  in index order and only its rows are joined to `messages`. The cursor is the
+  row-value comparison `(date, uid) < (?, ?)`, which SQLite seeks. The `OR` form
+  of the same test scans from the start of the mailbox (6.8 ms vs 0.37 ms at 100k).
 - The placement primary key `(account, mailbox, uidvalidity, uid)` serves the
-  per-mailbox listing (filtered to the current epoch), counts and reconcile.
-  `ListMessages` joins each placement to its message for the date order.
+  reconcile and the epoch checks.
 
 Column notes:
 
@@ -96,8 +102,18 @@ Column notes:
   maximum, so a canonical copy later upgrades a synthetic one.
 - `flags` is global per message. The last write wins: any placement's reconcile
   updates it.
-- `mailboxes.unseen` is the count of messages in the mailbox without `\Seen`,
-  from its last listing. It is stored, not counted per read.
+- `mailboxes.unseen` is the count of messages in the mailbox without `\Seen`.
+  `mailboxes.placements_count` and `bodies_count` are the number of placements
+  and of placements whose message has a body. `mailboxes.uidnext` is the server's
+  UIDNEXT at the last sync (written by `MarkSynced`).
+- The three counters are kept by triggers (`placements_ai`, `placements_ad`,
+  `placements_au`, `messages_body_au`, `messages_flags_au`). Each trigger touches
+  only the mailboxes of the rows it changes, found through the placement index. So
+  `Counts` reads one row per mailbox, and it does not depend on cache size.
+  `SetUnseen` still writes the count from the server listing at each reconcile.
+  That is a repair: it corrects the counter if a flag change came from outside
+  the cache. `TestCountersStayConsistent` recounts the base tables after each kind
+  of change. Breaking one trigger fails it.
 ```
 Indexes:
 
@@ -153,13 +169,13 @@ write method runs in one transaction. Batch writes (`UpsertHeaders`,
 | `UpsertMailboxes` | Insert or update mailboxes. Purges a mailbox whose UIDVALIDITY changed (in chunks, before the row is updated). |
 | `DeleteMailboxesNotIn` | Drop mailboxes that the server no longer lists. Refuses an empty list (`ErrEmptyListing`). Mailboxes are purged in chunks first. |
 | `GetSyncState` | Per-mailbox UIDVALIDITY, highest UID, last sync time. |
-| `MarkSynced` | Record a completed sync of a mailbox. |
+| `MarkSynced` | Record a completed sync of a mailbox, with the server's UIDNEXT (`uidnext`). |
 | `PurgeMailbox` | Delete a mailbox's placements, then the messages and bodies left with no placement (in chunks of 1000 rows). Keep the row. |
 | `SetUnseen` | Store the unseen count of a mailbox (computed by the sync from its listing). |
 | `MembershipOf` | Every placement of the message a key points at: folder and labels. |
 | `CachedUIDs` | UIDs cached for one epoch, ascending. |
 | `CachedFlags` | Cached flags of one epoch, by UID. Used to write only changed flags. |
-| `UpsertHeaders` | Batch insert or replace headers: the message (by `InternalID`) and its placement. Keeps `body_state`. |
+| `UpsertHeaders` | Batch insert or replace headers: the message (by `InternalID`) and its placement. Keeps `body_state`. A placement re-pointed to another message garbage-collects the old one in the same transaction (for example a synthetic id that became canonical; its body goes too, and the canonical message is fetched again). |
 | `DeleteMissing` | Remove placements whose UIDs are not in the keep set, then orphan messages. Transactions of at most 1000 rows. |
 | `UpdateFlags` | Set the global flags of the message behind each listed placement. Unknown UIDs are ignored. |
 | `ListMessages` | Placements of one mailbox joined to their messages, newest first. Keyset pagination with `Cursor{Date, UID}`. Limit 1 to 1000. |
@@ -167,7 +183,8 @@ write method runs in one transaction. Batch writes (`UpsertHeaders`,
 | `SetBody` | Store a body and set `body_state = cached`. |
 | `MarkBodyFailed` | Count a failed body fetch. |
 | `PendingBodies` | Up to N messages (entities) with no body and fewer than `MaxBodyAttempts` (3) failures, newest first. Each comes with the placement to fetch through: All Mail when present, never Recovered Messages-only. Takes a `*PendingCursor` (the last message of the previous page), so paging visits each message once. |
-| `Counts` | Placements and placements with a cached body, per mailbox. |
+| `Counts` | Placements and cached-body placements per mailbox, read from the counters (one row per mailbox). |
+| `MembershipOfMessages` | Placements of many messages in one `IN (...)` query, keyed by message id. Used for a list page. |
 | `CacheStats` | On-disk bytes (db, `-wal`, `-shm`) and the message and body totals of one account. Index-only counts, see `sqlite.go`. |
 
 ## Tests

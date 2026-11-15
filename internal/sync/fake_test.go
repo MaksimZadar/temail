@@ -332,7 +332,7 @@ func (b *fakeBridge) ListUIDs(ctx context.Context, mailbox string) (mail.UIDList
 		return mail.UIDListing{}, err
 	}
 	box := b.boxes[mailbox]
-	out := mail.UIDListing{UIDValidity: box.validity}
+	out := mail.UIDListing{UIDValidity: box.validity, UIDNext: box.next}
 	if b.zeroValidity[mailbox] {
 		out.UIDValidity = 0
 	}
