@@ -316,3 +316,29 @@ func TestUpgradeFromV2ResetsMessages(t *testing.T) {
 		t.Fatalf("sync state not reset: %+v", states)
 	}
 }
+
+func TestMessageCountsPerMailbox(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	mustUpsertBoxes(t, s,
+		model.Mailbox{Name: "All Mail", Kind: model.KindFolder, UIDValidity: 1},
+		model.Mailbox{Name: "INBOX", Kind: model.KindInbox, UIDValidity: 2},
+		model.Mailbox{Name: "Empty", Kind: model.KindFolder, UIDValidity: 4},
+	)
+	_ = s.UpsertHeaders(ctx, acct, []model.MessageHeader{
+		member("All Mail", 1, 5, "pm-c", t0),
+		member("INBOX", 2, 3, "pm-c", t0),
+		member("INBOX", 2, 4, "pm-d", t0),
+	})
+	got, err := s.MessageCounts(ctx, acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["All Mail"] != 1 || got["INBOX"] != 2 {
+		t.Fatalf("counts = %v", got)
+	}
+	// A mailbox with no placements is reported with 0, from its counter.
+	if n, ok := got["Empty"]; !ok || n != 0 {
+		t.Fatalf("empty mailbox = %v, want 0 present", got)
+	}
+}

@@ -726,6 +726,27 @@ func (s *sqliteStore) Counts(ctx context.Context, account string) ([]MailboxCoun
 	return out, rows.Err()
 }
 
+// MessageCounts implements Store. It reads the placements_count counter of each
+// mailbox, so it costs one row per mailbox and does not scan placements.
+func (s *sqliteStore) MessageCounts(ctx context.Context, account string) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, placements_count FROM mailboxes WHERE account = ?`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out[name] = n
+	}
+	return out, rows.Err()
+}
+
 // MembershipOfMessages implements Store. One query per call, using the
 // placements_mid index. The result is keyed by message id.
 func (s *sqliteStore) MembershipOfMessages(ctx context.Context, account string, mids []string) (map[string][]Placement, error) {
