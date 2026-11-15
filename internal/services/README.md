@@ -179,13 +179,17 @@ the user's explicit click.
 - `TestProvider(ctx, name)` returns `ProviderTest` `{ok, category, message}`.
   Categories: the llm package's `ok`, `unreachable`, `unauthorized`,
   `model_not_found`, `structured_output_unsupported`, `timeout` and `other`, plus
-  `cloud_disabled` (a disabled cloud provider, nothing sent), `no_model` and
-  `keyring_unavailable`. A disabled cloud provider is refused before any
+  `cloud_disabled` (a disabled cloud provider, nothing sent), `no_model`,
+  `keyring_unavailable` and `key_needs_reentry` (a stored key is not approved for
+  the current base URL; the user enters it again. It is not a network failure). A disabled cloud provider is refused before any
   request. Errors other than category come back as Go errors only for an unknown
   name.
 - `ListModels(ctx, name)` returns the sorted IDs. When the endpoint has no models
   route, it returns an empty list and `llm.ErrModelListUnsupported`, which the UI
   shows as "enter the model name".
+  When a stored key is not approved for the base URL, it returns an empty list
+  and `ErrKeyNeedsReentry`. Its text starts with `key_needs_reentry:`, so the UI
+  can match it the same way.
 - **`clientFor` never mixes a URL with another URL's key.** It reads the provider
   and the key under `cfgMu`, so a writer that is half done cannot be seen. It then
   releases the lock, and only then makes the client. Its key is used only if
