@@ -36,10 +36,28 @@ used, and the envelope value and the raw header both work. The id is canonical
 when it comes from one of those. Otherwise it is empty and not canonical, and the
 store gives the header a synthetic id.
 
+## Idle (`idle.go`)
+
+`NewWatcher()` returns a `Watcher`: its own connection, separate from the
+`Client`. IDLE blocks, and it only applies to the selected mailbox, so it cannot
+share the client's operation lock. The watcher logs in with the same pin and TLS
+rules as `Client.Connect`.
+
+- `Idle(ctx, mailbox, onChange)` selects the mailbox with EXAMINE (read-only),
+  starts IDLE, and calls `onChange` for each unsolicited update (new messages,
+  expunges, fetches). The callback runs on the read loop, so it only sends a
+  signal. It returns when `ctx` ends, or when the server ends IDLE with an error.
+  go-imap re-issues IDLE by itself before the server's timeout.
+- `ErrIdleUnsupported` is returned when the capability list has no `IDLE`.
+- The watcher sends no change command. The read-only tests run the watcher as
+  well: the static guard checks the package source, and the runtime test checks
+  the whole client.
+
 ## Status and Capabilities
 
 - `Status(ctx, mailbox)` returns `MailboxStatus{Name, UIDValidity, UIDNext,
-  Messages, Unseen}` from `STATUS`. It does not select the mailbox, so it is
+  Messages, Unseen}` from `STATUS`. The sync watcher uses it to decide which
+  mailboxes changed (see `internal/sync/README.md`). It does not select the mailbox, so it is
   cheap for All Mail, where `SELECT` builds a large snapshot. It is meant for
   polling.
 - `Capabilities()` returns the server's capability names from the last login,

@@ -42,6 +42,27 @@ type imapClient struct {
 	// operation.
 	mu sync.Mutex
 	cl *imapclient.Client
+	// onChange receives unsolicited server updates while Idle runs. It is set
+	// only by Idle, and it must not block (it is called on the read loop).
+	changeMu sync.Mutex
+	onChange func()
+}
+
+// setOnChange sets or clears (nil) the change callback.
+func (c *imapClient) setOnChange(f func()) {
+	c.changeMu.Lock()
+	c.onChange = f
+	c.changeMu.Unlock()
+}
+
+// notifyChange forwards an unsolicited update to the Idle caller, if any.
+func (c *imapClient) notifyChange() {
+	c.changeMu.Lock()
+	f := c.onChange
+	c.changeMu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 // NewClient returns an unconnected read-only Client.
@@ -64,7 +85,7 @@ func (c *imapClient) Connect(ctx context.Context, acct config.BridgeAccount, pas
 		return err
 	}
 
-	cl, err := dialBridge(ctx, acct)
+	cl, err := dialBridge(ctx, acct, c.unilateral())
 	if err != nil {
 		return err
 	}
@@ -114,13 +135,14 @@ func validateAccount(acct config.BridgeAccount) error {
 
 // dialBridge opens the TCP connection, performs TLS (implicit or STARTTLS) with
 // the pin check, and returns an IMAP client that is not yet logged in.
-func dialBridge(ctx context.Context, acct config.BridgeAccount) (*imapclient.Client, error) {
+func dialBridge(ctx context.Context, acct config.BridgeAccount, unilateral *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
 	addr := net.JoinHostPort(acct.Host, strconv.Itoa(acct.IMAPPort))
 	pin := &pinCheck{}
 	tlsCfg := tlsConfigFor(strings.ToLower(acct.CertFingerprint), pin)
 	opts := &imapclient.Options{
-		TLSConfig:   tlsCfg,
-		WordDecoder: wordDecoder,
+		TLSConfig:             tlsCfg,
+		WordDecoder:           wordDecoder,
+		UnilateralDataHandler: unilateral,
 	}
 
 	dialer := &net.Dialer{Timeout: dialTimeout}
