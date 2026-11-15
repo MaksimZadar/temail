@@ -165,6 +165,53 @@ extra logic, and it costs one `ListUIDs` and one local read per mailbox. The
 | `headers` | Header windows for one mailbox | `HeadersDone` / `HeadersTotal` (this run's pending UIDs) |
 | `bodies` | Bodies for one mailbox | `BodiesDone` (cached bodies) / `BodiesTotal` (cached messages) |
 
+## Watching for changes (phase P4 PR B)
+
+After the first sync, `Watcher` keeps the cache current. It has two triggers.
+
+- **IDLE** on a second connection, on All Mail, or on INBOX when All Mail is
+  hidden. go-imap re-issues IDLE before the server's timeout. A new message,
+  an expunge or a flag change sends a signal to the check.
+- **Reconcile timer.** Every 120 s with IDLE, or every 30 s without it. It is a
+  backstop for changes IDLE does not report.
+
+A **check** (`Syncer.Check`) uses `LIST` and `STATUS` only. It never SELECTs a
+mailbox, so All Mail is not built as a snapshot. For each cached mailbox it
+compares the server with the cache:
+
+| Server | Cache | Result |
+|--------|-------|--------|
+| mailbox list differs | | full `Run` (new or removed mailbox) |
+| UIDVALIDITY differs | | that mailbox is resynced (its placements are purged) |
+| UIDNEXT-1 above highest UID | | new mail: that mailbox is synced |
+| MESSAGES differs | | a message was added or removed: synced |
+| UNSEEN differs | | a read or unread change: synced |
+| never synced | | synced |
+
+A changed mailbox is synced incrementally by `RunChanged`: the planner fetches
+only UIDs that are not cached, the reconcile removes what is gone, and the body
+queue holds only messages without a body. The result is then reported.
+
+**Flags only.** A change to `\Flagged` alone does not move any of the counts
+above, so `STATUS` cannot see it. IDLE does see it, and the next check picks it
+up. If IDLE is not available, such a change waits for the next full sync.
+
+**Bursts.** A signal waits for `Debounce` (500 ms) and drains any others, so a
+burst is one check.
+
+**Errors.** A transport failure backs off (doubling, up to five minutes) and
+retries. A check that fails with a per-mailbox error is reported in
+`mailboxErrors` and does not stop the watcher. An authentication failure or a
+certificate error stops the watcher, and the service emits `sync:error`. Those
+errors are not retried, because each failed login counts toward Bridge's limit.
+
+**Shutdown.** `Run` returns only after the IDLE goroutine has ended and its
+connection is closed (`TestShutdownLeavesNoIdleGoroutine`).
+
+**No IDLE.** When the server does not offer IDLE, or Bridge has turned it off,
+the watcher does not start an IDLE connection. It polls at the shorter period
+(`TestIdleLessFallbackPolls`).
+
 ## Future work
 
 - **Body dedupe by Message-ID.** In Proton, a message in "All Mail" and in
@@ -175,6 +222,14 @@ extra logic, and it costs one `ListUIDs` and one local read per mailbox. The
   implemented.
 
 ## Tests
+
+`watch_test.go` covers an IDLE update that triggers an incremental sync (cached
+messages are not fetched again), each STATUS difference case, an unchanged check
+that issues no UID listing, a mailbox-list change that needs a full run, a check
+that never SELECTs All Mail, the IDLE-less poll, the auth failure stopping the
+watcher with one login attempt, shutdown with no goroutine left running, a
+dropped IDLE reconnecting, a transport failure retried, and a burst of updates
+being one check. The `-race` run was repeated 10 times with no failures.
 
 `membership_test.go` covers one message in All Mail, INBOX and a label (one
 entity, one body fetch, the membership, the global flags), deletion of one copy,

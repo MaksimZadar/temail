@@ -125,6 +125,16 @@ type Syncer struct {
 	connect ConnectFunc
 	opts    Options
 	sleep   func(context.Context, time.Duration) error
+	// connected is true while the client has a working connection. The watcher
+	// keeps one connection open between checks, so it must know when it dropped.
+	connected bool
+}
+
+// Close logs out and closes the client connection. The Syncer can connect again
+// later with Run or RunChanged.
+func (s *Syncer) Close() error {
+	s.connected = false
+	return s.client.Close()
 }
 
 // New returns a Syncer. It does not connect; Run does.
@@ -162,7 +172,7 @@ func (s *Syncer) Run(ctx context.Context) (Result, error) {
 	if err := s.connectWithRetry(ctx); err != nil {
 		return res, err
 	}
-	defer func() { _ = s.client.Close() }()
+	defer func() { _ = s.Close() }()
 
 	s.emit(Progress{Account: s.opts.Account, State: StateMailboxes})
 	var boxes []model.Mailbox
