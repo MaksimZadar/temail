@@ -8,6 +8,8 @@ vi.mock("./lib/api", () => ({
   trustCert: vi.fn(),
   testConnection: vi.fn(),
   syncStart: vi.fn(async () => {}),
+  listMailboxes: vi.fn(async () => []),
+  listMessages: vi.fn(async () => ({ messages: [], next: null })),
   syncStatus: vi.fn(async () => ({
     running: false,
     stopTimedOut: false,
@@ -51,11 +53,14 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows the main placeholder when configured and pinned", async () => {
+  it("shows the mailbox view when configured and pinned", async () => {
     m.getStatus.mockResolvedValue(st({ configured: true, certPinned: true }));
     render(App);
     expect(
-      await screen.findByText("Your mailbox is syncing"),
+      await screen.findByRole("toolbar", { name: "Mailbox" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("navigation", { name: "Folders" }),
     ).toBeInTheDocument();
   });
 

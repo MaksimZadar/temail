@@ -1,6 +1,6 @@
 // Thin typed wrappers over the generated Wails bindings and events. Tests
 // replace this whole module, so nothing else imports the bindings directly.
-import { Events } from "@wailsio/runtime";
+import { Browser, Events } from "@wailsio/runtime";
 import {
   MailService,
   SetupService,
@@ -43,6 +43,62 @@ export interface MailboxInfo {
   displayName: string;
   messages: number;
 }
+export type MailboxKind =
+  | "inbox"
+  | "sent"
+  | "drafts"
+  | "trash"
+  | "spam"
+  | "archive"
+  | "folder"
+  | "label";
+export interface MailboxDTO extends MailboxInfo {
+  kind: MailboxKind;
+  uidValidity: number;
+  bodies: number;
+  lastSync: string | null;
+}
+export interface Address {
+  name: string;
+  email: string;
+}
+export interface MessageHeader {
+  mailbox: string;
+  uidValidity: number;
+  uid: number;
+  messageId: string;
+  subject: string;
+  from: Address[] | null;
+  to: Address[] | null;
+  date: string;
+  flags: string[] | null;
+}
+export interface Attachment {
+  filename: string;
+  contentType: string;
+  size: number;
+  partId: string;
+}
+export interface Message extends MessageHeader {
+  textBody: string;
+  htmlBody: string;
+  attachments: Attachment[] | null;
+}
+export interface PageCursor {
+  date: string;
+  uid: number;
+}
+export interface MessagePage {
+  messages: MessageHeader[] | null;
+  next: PageCursor | null;
+}
+export interface AttachmentData {
+  filename: string;
+  contentType: string;
+  size: number;
+  /** base64 */
+  data: string;
+}
 export interface ProgressEvent {
   state: string;
   mailbox: string;
@@ -76,8 +132,42 @@ export const trustCert = (
 ): Promise<void> => SetupService.TrustCert(fingerprint, replace);
 export const testConnection = (): Promise<ConnectionTest> =>
   SetupService.TestConnection();
-export const listMailboxes = (): Promise<MailboxInfo[]> =>
-  MailService.ListMailboxes();
+export const listMailboxes = (): Promise<MailboxDTO[]> =>
+  MailService.ListMailboxes() as unknown as Promise<MailboxDTO[]>;
+export const listMessages = (
+  mailbox: string,
+  cursor: PageCursor | null,
+  limit: number,
+): Promise<MessagePage> =>
+  MailService.ListMessages(
+    mailbox,
+    cursor as never,
+    limit,
+  ) as unknown as Promise<MessagePage>;
+export const getMessage = (
+  mailbox: string,
+  uidValidity: number,
+  uid: number,
+): Promise<Message> =>
+  MailService.GetMessage(
+    mailbox,
+    uidValidity,
+    uid,
+  ) as unknown as Promise<Message>;
+export const getAttachment = (
+  mailbox: string,
+  uidValidity: number,
+  uid: number,
+  partId: string,
+): Promise<AttachmentData> =>
+  MailService.GetAttachment(
+    mailbox,
+    uidValidity,
+    uid,
+    partId,
+  ) as unknown as Promise<AttachmentData>;
+/** Open a URL in the system browser. */
+export const openUrl = (url: string): Promise<void> => Browser.OpenURL(url);
 export const syncStart = (): Promise<void> => SyncService.Start();
 export const syncStatus = (): Promise<SyncStatus> => SyncService.Status();
 
