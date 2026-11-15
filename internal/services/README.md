@@ -25,6 +25,7 @@ adding a method. The rules are:
 | `SetupService` | `GetStatus(ctx)`, `SaveAccount(ctx, host, imapPort, smtpPort, tlsMode, username, password)`, `ProbeCert(ctx)`, `TrustCert(ctx, fingerprint, replace)`, `TestConnection(ctx)` |
 | `MailService` | `CacheInfo(ctx)`, `ListMailboxes(ctx)`, `ListMessages(ctx, mailbox, cursor, limit)`, `GetMessage(ctx, mailbox, uidValidity, uid)`, `GetAttachment(ctx, mailbox, uidValidity, uid, partID)` |
 | `SyncService` | `Start()`, `Stop()`, `Status()` |
+| `LLMService` | `ListProviders()`, `SaveProvider(input)`, `DeleteProvider(name)`, `SetDefaultProvider(name)`, `TestProvider(ctx, name)`, `ListModels(ctx, name)` |
 
 `ctx` is the Wails call context. It is not part of the JavaScript signature.
 
@@ -137,6 +138,45 @@ running, and its result is cached for 30 s.
   (also for partial runs, with `mailboxErrors`) or `sync:error`. A stopped run
   emits no done or error event.
 
+### LLMService (phase P3)
+
+Manages provider settings and keys. It never sends mail content. Its only network
+calls are `TestProvider` (one tiny structured call) and `ListModels`, both made by
+the user's explicit click.
+
+- `ListProviders()` returns `LLMProviderDTO`: `name`, `baseURL`, `model`, `kind`,
+  `enabled`, `capabilities` (`structuredOutput`, `tools`, `maxContext`),
+  `isDefault` and `hasKey`. `hasKey` only says whether a key is available (from
+  the keyring or `TEMAIL_LLM_<NAME>_KEY`). The key itself is never returned.
+- `SaveProvider(LLMProviderInput)` validates the name (`[A-Za-z0-9][A-Za-z0-9_-]{0,63}`),
+  the model length and the key length, then `config.Validate`. It writes
+  `config.json` first and the key second. A failed key write restores the old
+  config. An empty `apiKey` keeps the stored key. A new provider with an empty
+  key has no key (valid for Ollama). **A changed base URL with a stored key fails
+  with `ErrKeyNeedsReentry` unless a new key is given**, so the old key is never
+  sent to a new address. The name is the ID and cannot be changed by an update.
+  The whole sequence holds `cfgMu`.
+- `DeleteProvider(name)` writes the config without the provider (clearing the
+  default if it was that one), then deletes the keyring key. If the key delete
+  fails, the config is restored.
+- `SetDefaultProvider(name)`; an empty name clears the default.
+- `TestProvider(ctx, name)` returns `ProviderTest` `{ok, category, message}`.
+  Categories: the llm package's `ok`, `unreachable`, `unauthorized`,
+  `model_not_found`, `structured_output_unsupported`, `timeout` and `other`, plus
+  `cloud_disabled` (a disabled cloud provider, nothing sent), `no_model` and
+  `keyring_unavailable`. A disabled cloud provider is refused before any
+  request. Errors other than category come back as Go errors only for an unknown
+  name.
+- `ListModels(ctx, name)` returns the sorted IDs. When the endpoint has no models
+  route, it returns an empty list and `llm.ErrModelListUnsupported`, which the UI
+  shows as "enter the model name".
+
+The LLM bound methods are checked by `bindings_test.go`: the exact method set,
+the read-only verb check (for this service only the mailbox-write verbs are
+banned, since config writes are its job), and the secret-field check. The
+`SaveProvider` input struct is allowed to carry `apiKey`, and nothing returned
+may.
+
 ## Injection
 
 Each service takes interfaces, so tests use fakes:
@@ -168,6 +208,11 @@ after the hook runs.
 - `bindings_test.go`: the bound method set, the read-only name check, the
   secret-field check on every bound return type, and which methods take the
   Wails context first.
+- `llm_test.go`: the DTO has no key and uses camelCase JSON; save validation
+  writes nothing; create keeps the key out of `config.json`; an empty key keeps the
+  stored one; a changed base URL needs a new key; keyring and config failures
+  roll back; delete and default; `TestProvider` categories against an `httptest`
+  endpoint; `ListModels` sort and 404 degrade; no key in any returned value.
 - `hardening_test.go`: a blocked keychain does not block startup; a late
   autostart is dropped; a stop during a credential read drops the launch; a
   restart starts one run with a fresh password; a stuck stop is reported and
