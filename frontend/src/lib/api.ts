@@ -92,6 +92,11 @@ export interface MessagePage {
   messages: MessageHeader[] | null;
   next: PageCursor | null;
 }
+export interface CacheInfo {
+  bytes: number;
+  messages: number;
+  bodies: number;
+}
 export interface AttachmentData {
   filename: string;
   contentType: string;
@@ -166,6 +171,8 @@ export const getAttachment = (
     uid,
     partId,
   ) as unknown as Promise<AttachmentData>;
+export const cacheInfo = (): Promise<CacheInfo> =>
+  MailService.CacheInfo() as unknown as Promise<CacheInfo>;
 /** Open a URL in the system browser. */
 export const openUrl = (url: string): Promise<void> => Browser.OpenURL(url);
 export const syncStart = (): Promise<void> => SyncService.Start();

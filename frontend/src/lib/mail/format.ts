@@ -84,3 +84,25 @@ export function mergeHead(
     (a, b) => Date.parse(b.date) - Date.parse(a.date) || b.uid - a.uid,
   );
 }
+
+const UNITS = ["B", "KB", "MB", "GB", "TB"];
+
+/** 1024-based size: "0 B", "1023 B", "1.0 KB", "12 MB", "1.2 GB". */
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  let v = n;
+  let u = 0;
+  while (v >= 1024 && u < UNITS.length - 1) {
+    v /= 1024;
+    u++;
+  }
+  if (u === 0) return `${Math.round(v)} B`;
+  let text = v < 10 ? v.toFixed(1) : String(Math.round(v));
+  // 1023.96 KB rounds up to "1024": show it in the next unit instead.
+  if (Number(text) >= 1024 && u < UNITS.length - 1) {
+    v /= 1024;
+    u++;
+    text = v.toFixed(1);
+  }
+  return `${text} ${UNITS[u]}`;
+}

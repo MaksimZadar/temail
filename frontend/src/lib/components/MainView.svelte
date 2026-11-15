@@ -4,6 +4,7 @@
   import { mail } from "../stores/mail.svelte";
   import { layout, MIN, MAX } from "../stores/layout.svelte";
   import { sync } from "../stores/sync.svelte";
+  import { cache } from "../stores/cache.svelte";
   import { ui } from "../stores/ui.svelte";
   import { findByKind } from "../mail/folders";
   import type { MailboxKind } from "../api";
@@ -66,6 +67,7 @@
 
   onMount(() => {
     void sync.start();
+    cache.start();
     void mail.loadFolders();
 
     // Refresh from sync events, coalesced: at most one reload every 2 s while
@@ -141,6 +143,7 @@
       window.removeEventListener("resize", onResize);
       offs.forEach((f) => f());
       sync.stop();
+      cache.stop();
     };
   });
 </script>
