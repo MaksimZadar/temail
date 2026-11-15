@@ -6,6 +6,7 @@ vi.mock("../api", () => ({
   listMessages: vi.fn(),
   getMessage: vi.fn(),
   syncStatus: vi.fn(),
+  syncStart: vi.fn(async () => {}),
   onEvent: vi.fn((name: string, fn: (d: unknown) => void) => {
     handlers[name] = fn;
     return () => delete handlers[name];
@@ -17,6 +18,7 @@ import { sync } from "./sync.svelte";
 import { Mail } from "./mail.svelte";
 import { keyOf, mergeHead } from "../mail/format";
 import { hdr } from "../../test-helpers";
+import { ui } from "./ui.svelte";
 
 const m = vi.mocked(api);
 const status = (o: Partial<api.SyncStatus> = {}): api.SyncStatus => ({
@@ -162,6 +164,73 @@ describe("footer states and the meaning of running", () => {
     vi.setSystemTime(Date.now() + 5 * 60_000);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(sync.text).toMatch(/checked \d+ min ago/);
+  });
+});
+
+describe("honest wording and Sync now", () => {
+  it("the Live tooltip says what is instant and what can lag", async () => {
+    m.syncStatus.mockResolvedValue(status({ watching: true, idle: true }));
+    await sync.start();
+    expect(sync.text).toBe("Live");
+    expect(sync.detail).toMatch(/New mail appears instantly/);
+    expect(sync.detail).toMatch(/read and star changes made elsewhere may take a few minutes/);
+  });
+
+  it("never says Live unless the live connection is up", async () => {
+    m.syncStatus.mockResolvedValue(status({ watching: true, idle: false }));
+    await sync.start();
+    expect(sync.text).not.toBe("Live");
+    expect(sync.text).toMatch(/^Up to date/);
+  });
+
+  it("Sync now while watching just asks for a check", async () => {
+    m.syncStatus.mockResolvedValue(status({ watching: true, idle: true }));
+    await sync.start();
+    await sync.syncNow();
+    expect(m.syncStart).toHaveBeenCalledTimes(1);
+    expect(ui.hint).toBe("Checking for new mail…");
+    m.syncStatus.mockResolvedValue(
+      status({ watching: true, idle: true, lastChecked: new Date().toISOString() }),
+    );
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(sync.lastChecked).not.toBeNull();
+  });
+
+  it("Sync now doesn't start another run during the first sync", async () => {
+    m.syncStatus.mockResolvedValue(status({ running: true }));
+    await sync.start();
+    await sync.syncNow();
+    expect(m.syncStart).not.toHaveBeenCalled();
+    expect(ui.hint).toBe("Already syncing");
+  });
+
+  it("reports a failed Sync now", async () => {
+    m.syncStatus.mockResolvedValue(status({ watching: true, idle: true }));
+    await sync.start();
+    m.syncStart.mockRejectedValueOnce(new Error("login refused"));
+    await sync.syncNow();
+    expect(ui.hint).toBe("Couldn't start a sync");
+  });
+
+  it("a progress event from a watcher check doesn't leave a stuck spinner", async () => {
+    // Status not yet known to say "watching": the event looks like a run start.
+    m.syncStatus.mockResolvedValue(status({ running: false, watching: false }));
+    await sync.start();
+    handlers["sync:progress"](ev("headers", "INBOX"));
+    expect(sync.running).toBe(true); // optimistic
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(sync.running).toBe(false); // the status says it is not the first sync
+  });
+
+  it("a stray sync:done is not treated as the end of the first sync", async () => {
+    m.syncStatus.mockResolvedValue(status({ running: true }));
+    await sync.start();
+    handlers["sync:done"]({
+      mailboxes: 1, headersFetched: 0, deleted: 0, bodiesFetched: 0, bodiesFailed: 0, mailboxErrors: null,
+    });
+    m.syncStatus.mockResolvedValue(status({ running: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sync.running).toBe(true);
   });
 });
 

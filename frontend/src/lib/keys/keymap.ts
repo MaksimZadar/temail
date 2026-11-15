@@ -60,7 +60,7 @@ export const keymap: Binding[] = [
   b("g j", "goto.spam", "main", 2, "Go to", "Spam"),
   b("g l", "goto.pick", "main", 2, "Go to", "Pick a folder or label"),
   b("g ,", "settings.open", "main", 2, "Go to", "Settings"),
-  b("g r", "sync.refresh", "main", 2, "Go to", "Refresh"),
+  b("g r", "sync.refresh", "main", 2, "Go to", "Sync now"),
 
   // Message view
   b("g x", "view.links", "main", 2, "Message", "Links in this message"),

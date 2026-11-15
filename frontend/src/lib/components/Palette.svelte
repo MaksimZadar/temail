@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import * as api from "../api";
   import { ui } from "../stores/ui.svelte";
   import { mail } from "../stores/mail.svelte";
+  import { sync } from "../stores/sync.svelte";
   import { layout } from "../stores/layout.svelte";
   import { trapFocus } from "../focus";
   import { pieces, rank, type Cmd } from "../palette-rank";
@@ -12,10 +12,9 @@
 
   const base: Cmd[] = [
     {
-      name: "Refresh mail",
-      aliases: ["sync", "fetch", "reload"],
-      run: () =>
-        void api.syncStart().catch(() => ui.flash("Couldn't start a sync")),
+      name: "Sync now",
+      aliases: ["refresh", "fetch", "reload", "check mail", "sync"],
+      run: () => void sync.syncNow(),
     },
     {
       name: "Settings",

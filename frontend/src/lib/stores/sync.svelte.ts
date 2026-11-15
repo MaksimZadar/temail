@@ -1,4 +1,5 @@
 import * as api from "../api";
+import { ui } from "./ui.svelte";
 
 export type FolderState = "waiting" | "syncing" | "done" | "failed";
 export type Phase = "idle" | "connecting" | "headers" | "bodies";
@@ -123,6 +124,7 @@ class Sync {
   private finished = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private tick: ReturnType<typeof setInterval> | undefined;
+  private statusTimer: ReturnType<typeof setTimeout> | undefined;
   private seeded = false;
   private offs: (() => void)[] = [];
 
@@ -186,8 +188,10 @@ class Sync {
       this.lastChecked !== null
         ? ` Last checked ${relativeTime(this.lastChecked, this.now)}.`
         : "";
+    const note =
+      " New mail appears instantly; read and star changes made elsewhere may take a few minutes.";
     return this.idle
-      ? `Watching for new mail.${when}`
+      ? `Watching for new mail.${when}${note}`
       : `The live connection is down, so temail checks every so often.${when}`;
   }
 
@@ -241,7 +245,10 @@ class Sync {
       // A new run after a finished one.
       this.resetRun();
     }
+    // Optimistic: progress events also fire for a watcher check, so a short
+    // look at the real status (`running` is the first sync only) corrects it.
     this.running = true;
+    this.checkSoon();
     this.error = "";
     if (this.announcement !== "Sync started")
       this.announcement = "Sync started";
@@ -298,6 +305,31 @@ class Sync {
     void this.refreshStatus();
   }
 
+  private checkSoon(): void {
+    if (this.statusTimer !== undefined) return;
+    this.statusTimer = setTimeout(() => {
+      this.statusTimer = undefined;
+      void this.refreshStatus();
+    }, 1000);
+  }
+
+  /** Ask for a check now. While watching this just kicks the watcher. */
+  async syncNow(): Promise<void> {
+    if (this.running) {
+      ui.flash("Already syncing");
+      return;
+    }
+    try {
+      await api.syncStart();
+    } catch {
+      ui.flash("Couldn't start a sync");
+      return;
+    }
+    ui.flash(this.watching ? "Checking for new mail…" : "Syncing…");
+    // The result arrives as events; look at the status once it had time to run.
+    setTimeout(() => void this.refreshStatus(), 1500);
+  }
+
   /** Read watching/idle/lastChecked. `running` is the initial sync only. */
   async refreshStatus(): Promise<void> {
     try {
@@ -307,6 +339,9 @@ class Sync {
       this.idle = !!s.idle;
       const t = s.lastChecked ? Date.parse(s.lastChecked) : NaN;
       this.lastChecked = Number.isNaN(t) ? null : t;
+      // The status is the truth for "first sync in progress".
+      this.running = !!s.running;
+      if (!s.running && this.phase !== "idle") this.phase = "idle";
       if (s.watching) {
         // The initial sync is over. Never leave the spinner on.
         this.running = false;
@@ -382,7 +417,7 @@ class Sync {
     ];
     this.tick = setInterval(() => {
       this.now = Date.now();
-      if (this.watching) void this.refreshStatus();
+      if (this.watching || this.running) void this.refreshStatus();
     }, 30_000);
     try {
       const s = await api.syncStatus();
@@ -410,6 +445,8 @@ class Sync {
     this.offs.forEach((f) => f());
     this.offs = [];
     clearInterval(this.tick);
+    clearTimeout(this.statusTimer);
+    this.statusTimer = undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
   }
