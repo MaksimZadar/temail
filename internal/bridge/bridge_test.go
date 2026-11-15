@@ -270,3 +270,71 @@ func TestSessionResolveErrorIsReturned(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestSessionCloseIsFinal(t *testing.T) {
+	c := &fakeClient{}
+	s := NewSession(func(context.Context) (config.BridgeAccount, string, error) {
+		return oneAccount().Bridge[0], testPassword, nil
+	}, func() mail.Client { return c })
+	if err := s.With(context.Background(), func(context.Context, mail.Client) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.With(context.Background(), func(context.Context, mail.Client) error { return nil }); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("With after Close: %v", err)
+	}
+}
+
+func TestSessionDoesNotKeepClientConnectedDuringClose(t *testing.T) {
+	c := &fakeClient{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	c.connect = func(config.BridgeAccount, string) error {
+		close(started)
+		<-release
+		return nil
+	}
+	s := NewSession(func(context.Context) (config.BridgeAccount, string, error) {
+		return oneAccount().Bridge[0], testPassword, nil
+	}, func() mail.Client { return c })
+	done := make(chan error, 1)
+	go func() {
+		done <- s.With(context.Background(), func(context.Context, mail.Client) error { return nil })
+	}()
+	<-started
+	_ = s.Close()
+	close(release)
+	if err := <-done; !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("With racing Close: %v", err)
+	}
+	if c.closes == 0 {
+		t.Fatal("client connected during Close was not closed")
+	}
+}
+
+func TestSessionQueuedCallHonoursContext(t *testing.T) {
+	c := &fakeClient{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := NewSession(func(context.Context) (config.BridgeAccount, string, error) {
+		return oneAccount().Bridge[0], testPassword, nil
+	}, func() mail.Client { return c })
+	go func() {
+		_ = s.With(context.Background(), func(context.Context, mail.Client) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ran := false
+	err := s.With(ctx, func(context.Context, mail.Client) error { ran = true; return nil })
+	close(release)
+	if !errors.Is(err, context.Canceled) || ran {
+		t.Fatalf("queued call: err=%v ran=%v", err, ran)
+	}
+}

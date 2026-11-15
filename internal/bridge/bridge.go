@@ -138,29 +138,41 @@ func EnsurePinned(ctx context.Context, mgr *config.Manager, cfg *config.Config, 
 	return nil
 }
 
+// ErrSessionClosed is returned by Session.With after Close.
+var ErrSessionClosed = errors.New("bridge session is closed")
+
 // Session keeps one lazily connected mail.Client for on-demand reads (for
-// example a body that is not cached yet). Calls are serialised. A call that
-// fails closes the connection, so the next call reconnects. Close may be called
-// at any time, including while a call is running; that call then fails.
+// example a body that is not cached yet). Calls are serialised: a call waits
+// for its turn, and the wait ends when its context does. A call that fails
+// closes the connection, so the next call reconnects. Close is final: it may be
+// called while a call is running, and no client is stored after it.
 type Session struct {
 	resolve   func(context.Context) (config.BridgeAccount, string, error)
 	newClient func() mail.Client
 
-	opMu   sync.Mutex // serialises With
-	stMu   sync.Mutex // guards client
+	// slot has capacity 1. Holding a token is the right to run With.
+	slot chan struct{}
+
+	stMu   sync.Mutex // guards client and closed
 	client mail.Client
+	closed bool
 }
 
 // NewSession returns a Session. resolve supplies the account and password for
 // each (re)connect; newClient makes the client.
 func NewSession(resolve func(context.Context) (config.BridgeAccount, string, error), newClient func() mail.Client) *Session {
-	return &Session{resolve: resolve, newClient: newClient}
+	return &Session{resolve: resolve, newClient: newClient, slot: make(chan struct{}, 1)}
 }
 
-// With runs fn on a connected client, connecting first if needed.
+// With runs fn on a connected client, connecting first if needed. If ctx ends
+// while the call is still queued, With returns ctx.Err() without running fn.
 func (s *Session) With(ctx context.Context, fn func(ctx context.Context, c mail.Client) error) error {
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
+	select {
+	case s.slot <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-s.slot }()
 
 	c, err := s.connected(ctx)
 	if err != nil {
@@ -175,6 +187,10 @@ func (s *Session) With(ctx context.Context, fn func(ctx context.Context, c mail.
 
 func (s *Session) connected(ctx context.Context) (mail.Client, error) {
 	s.stMu.Lock()
+	if s.closed {
+		s.stMu.Unlock()
+		return nil, ErrSessionClosed
+	}
 	c := s.client
 	s.stMu.Unlock()
 	if c != nil {
@@ -191,6 +207,12 @@ func (s *Session) connected(ctx context.Context) (mail.Client, error) {
 		return nil, err
 	}
 	s.stMu.Lock()
+	if s.closed {
+		// Close ran while we were connecting: do not keep the new client.
+		s.stMu.Unlock()
+		_ = c.Close()
+		return nil, ErrSessionClosed
+	}
 	s.client = c
 	s.stMu.Unlock()
 	return c, nil
@@ -206,10 +228,11 @@ func (s *Session) drop(c mail.Client) {
 	_ = c.Close()
 }
 
-// Close closes the current connection, if any. It does not wait for a running
-// call.
+// Close marks the session closed and closes the current connection, if any. It
+// does not wait for a running call; that call fails once its client is closed.
 func (s *Session) Close() error {
 	s.stMu.Lock()
+	s.closed = true
 	c := s.client
 	s.client = nil
 	s.stMu.Unlock()
