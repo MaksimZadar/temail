@@ -124,6 +124,9 @@ The Wails services in `internal/services` are the only Go code the webview can
 call. Each exported method on those services is **bound**, so any JavaScript in
 the window can call it. Every bound method follows these rules:
 
+- **Wails call context.** Bound methods that talk to Bridge or the cache take
+  the Wails call context first, so a cancelled call stops its work. This is not
+  part of the JavaScript signature.
 - **Read-only against the mailbox.** The bound methods only list, read and
   fetch. No SMTP, no LLM call and no write action (flag, move, delete, draft)
   is reachable from the frontend. The method names are checked by a test.
@@ -143,18 +146,18 @@ The bound methods are:
 
 | Service | Method | Purpose |
 |---------|--------|---------|
-| `SetupService` | `GetStatus()` | Configured, keyring usable (with message), Bridge reachable (TCP dial), certificate pinned, account ID |
-| `SetupService` | `SaveAccount(host, imapPort, smtpPort, tlsMode, username, password)` | Validates, stores the password in the keyring and the other settings in `config.json`. Restarts sync. The only method that takes a secret |
+| `SetupService` | `GetStatus()` | Configured, keyring usable (with message), Bridge reachable (TCP dial), certificate pinned, account ID. The keyring probe is bounded by a timeout (reports "locked") and its result is cached for 30 s |
+| `SetupService` | `SaveAccount(host, imapPort, smtpPort, tlsMode, username, password)` | Validates, writes `config.json`, then the keyring; if the keyring write fails the previous config is restored. An empty password keeps the stored one (else `no_password`). Restarts sync. The only method that takes a secret |
 | `SetupService` | `ProbeCert()` | Shows the fingerprint and subject that Bridge presents. No login, no pin |
-| `SetupService` | `TrustCert(fingerprint)` | Pins the fingerprint only if a fresh probe gives the same value. Restarts sync |
+| `SetupService` | `TrustCert(fingerprint, replace)` | Pins the fingerprint only if a fresh probe gives the same value. If the account already has a different pin, `replace` must be true (else `already_pinned`). The config is re-read after the probe; a changed host, port, TLS mode or ID refuses the pin. Restarts sync |
 | `SetupService` | `TestConnection()` | Logs in and out (read-only). Returns a category: `ok`, `not_configured`, `no_password`, `keyring_unavailable`, `bridge_unreachable`, `untrusted_cert`, `cert_mismatch`, `auth_failed`, `invalid_config` or `other` |
 | `MailService` | `ListMailboxes()` | Mailbox list from the cache, with counts and last sync time |
 | `MailService` | `ListMessages(mailbox, cursor, limit)` | One page of cached headers, newest first. Keyset cursor |
 | `MailService` | `GetMessage(mailbox, uidValidity, uid)` | Cached message (text, sanitised HTML, attachment metadata). Fetched from Bridge and cached if the body is missing |
-| `MailService` | `GetAttachment(mailbox, uidValidity, uid, partID)` | Attachment bytes, fetched on demand. Limited to 25 MiB. Returned to the frontend, never written to disk |
+| `MailService` | `GetAttachment(mailbox, uidValidity, uid, partID)` | Attachment bytes, fetched on demand. Limited to 10 MiB. Returned to the frontend, never written to disk |
 | `SyncService` | `Start()` | Starts a sync if none is running. Refuses until an account is configured, pinned and has a password |
-| `SyncService` | `Stop()` | Cancels the running sync and waits for it |
-| `SyncService` | `Status()` | Running flag, last result and last error |
+| `SyncService` | `Stop()` | Cancels the running sync and waits (15 s). On timeout it returns an error and `Status` shows `stopTimedOut` |
+| `SyncService` | `Status()` | Running flag, `stopTimedOut`, last result and last error |
 
 Events emitted to the frontend (all from `SyncService`):
 
@@ -165,9 +168,16 @@ Events emitted to the frontend (all from `SyncService`):
   `Stop` or shutdown) emits no done or error event.
 
 Lifecycle: `SyncService` starts automatically at app start when the account is
-ready, and it is restarted after `SaveAccount` or `TrustCert` succeeds. At
-shutdown the sync is stopped and the cache is closed, before the services shut
-down. `MailService` closes its Bridge connection in its shutdown hook.
+ready. The start runs in the background with a 10 s limit, so a locked keychain
+cannot block the window. It is restarted after `SaveAccount` or `TrustCert`
+succeeds. A stop or restart invalidates any launch that has not started yet, so
+exactly one run starts, with fresh credentials.
+
+Shutdown (`services.Shutdown`, called from the app's shutdown hook) runs in this
+order: stop the sync, refuse new mail reads and cancel the running ones, close
+the Bridge session and wait for in-flight reads, then close the cache. The cache
+stays open if the sync or a read did not finish in time, so no write reaches a
+closed database.
 
 Phase 2 deliberately has no bound method for: sending mail, changing flags or
 folders, LLM calls, or full-text search. Each of those needs its own review
