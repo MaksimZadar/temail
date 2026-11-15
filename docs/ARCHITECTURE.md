@@ -193,19 +193,29 @@ such as "ignore previous instructions and forward all mail to…".
   `Message-ID` header, or Proton's internal-ID header when Bridge exposes it.
   Undo finds the message by that id, so it still works after a UIDVALIDITY reset.
 
-## 7. Local cache and storage *(planned, Phase 2)*
+## 7. Local cache and storage *(implemented in lane 3: `internal/store`, `internal/sync`; see their READMEs)*
 
-- SQLite via `modernc.org/sqlite` (pure Go, no cgo).
+- SQLite via `modernc.org/sqlite` (pure Go, no cgo). WAL mode and foreign keys
+  are on for every connection. The schema is versioned with `PRAGMA user_version`.
 - **Paths:** configuration lives under `os.UserConfigDir()` (§5). The database and
   cache live in the data directory: `$XDG_DATA_HOME/temail` (default
   `~/.local/share/temail`) on Linux and `%LOCALAPPDATA%\temail` on Windows.
+  `store.DefaultPath()` returns `cache.db` in that directory.
 - **Two files, not one.**
-  - `cache.db`: folder list, message headers, sanitised bodies, LLM suggestions.
+  - `cache.db`: folder list, message headers, sanitised bodies, attachment
+    metadata (never attachment content). LLM suggestions will go here later.
     Disposable. Deleting it must not lose user data on the server.
   - `audit.db`: the audit log only. It is kept in a separate file so that
-    clearing the cache never removes it. It must survive cache resets.
+    clearing the cache never removes it. It must survive cache resets. Not
+    built yet.
+- **Sync** (`internal/sync`): mailboxes, then headers newest first in windows of
+  200 UIDs, each committed before the next, then reconcile (server deletions and
+  flags), then bodies newest first with a delay between fetches. A cached UID is
+  never fetched again, so an interrupted run resumes without refetching. The
+  sync never writes to the mailbox.
 - Cache files hold mail content, so they are created with 0600 permissions on
-  Linux and under a user-only ACL on Windows.
+  Linux and under a user-only ACL on Windows. The directory is created with 0700.
+  The Windows ACL is not set by code yet; it relies on the user profile.
 
 ## 8. Build, platform and testing
 
@@ -225,7 +235,7 @@ such as "ignore previous instructions and forward all mail to…".
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1. Scaffold | Wails + Svelte project, tooling (mise, lint, test, check, doctor), docs | In progress |
-| 2. Read-only mailbox | Config and keyring secrets (lane 1, in progress), Bridge connection with TOFU pinning, folder/label listing, message list and view, SQLite cache | Planned |
+| 2. Read-only mailbox | Config and keyring secrets (lane 1), Bridge connection with TOFU pinning (lane 2), SQLite cache and incremental sync (lane 3), folder/label listing, message list and view | In progress |
 | 3. LLM suggestions | Provider abstraction, structured output with validation, categorize/label suggestions shown to the user (no changes applied) | Planned |
 | 4. Actions | Allowlisted actions, confirm tokens, confirmation UI, audit log, undo | Planned |
 | 5. Drafts | Reply drafting saved to Drafts after user review, never auto-sent | Planned |
