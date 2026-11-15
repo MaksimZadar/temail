@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
+	sqlite "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
 
 	"github.com/MaksimZadar/temail/internal/model"
 )
@@ -46,20 +46,73 @@ func Open(path string) (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", dsn)
+	ctx := context.Background()
+	// The first connection to a new file switches it to WAL. That switch can
+	// return SQLITE_BUSY at once, without waiting on busy_timeout, while another
+	// process or goroutine is opening the same file (measured: about 7% of
+	// concurrent first opens, none without the WAL switch). The switch is
+	// idempotent, so the whole open is retried on busy. See retryBusy.
+	var db *sql.DB
+	err = retryBusy(ctx, func() error {
+		d, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			return err
+		}
+		if err := d.Ping(); err != nil {
+			_ = d.Close()
+			return err
+		}
+		db = d
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("open cache: %w", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("open cache %s: %w", path, err)
 	}
 	s := &sqliteStore{db: db}
-	if err := s.migrate(context.Background()); err != nil {
+	if err := retryBusy(ctx, func() error { return s.migrate(ctx) }); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// busyRetryTimeout bounds how long Open retries SQLITE_BUSY. Each attempt
+// already waits busy_timeout (5 s) for locks it can wait on, so this is a
+// second bound for the cases that return BUSY immediately.
+const busyRetryTimeout = 15 * time.Second
+
+// retryBusy runs op until it succeeds, fails with an error other than
+// SQLITE_BUSY or SQLITE_LOCKED, or busyRetryTimeout passes. Waits between
+// attempts grow from 5 ms to 200 ms. op must be safe to run again: every
+// attempt here starts a new connection or a new transaction.
+func retryBusy(ctx context.Context, op func() error) error {
+	deadline := time.Now().Add(busyRetryTimeout)
+	delay := 5 * time.Millisecond
+	for {
+		err := op()
+		if err == nil || !isBusy(err) || time.Now().After(deadline) {
+			return err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+		delay = min(delay*2, 200*time.Millisecond)
+	}
+}
+
+// isBusy reports whether err is SQLITE_BUSY or SQLITE_LOCKED, including their
+// extended result codes (the primary code is the low byte).
+func isBusy(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	code := se.Code() & 0xff
+	return code == 5 || code == 6 // SQLITE_BUSY, SQLITE_LOCKED
 }
 
 // ensureFile creates the database file with 0600 if it does not exist yet.

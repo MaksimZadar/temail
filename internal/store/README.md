@@ -28,6 +28,18 @@ or spaces opens the file it names. Pragmas are set on every connection:
 - `foreign_keys(1)`: deleting a mailbox removes its messages, and deleting a
   message removes its body.
 - `busy_timeout(5000)` and `synchronous(NORMAL)`.
+
+### First open and SQLITE_BUSY
+
+The first connection to a new file switches it to WAL. That switch can return
+`SQLITE_BUSY` immediately, without using `busy_timeout`, while another
+connection (the app and `cmd/mailsync` can both open the cache) is opening the
+same file. Measured on this repo: 59 of 800 concurrent first opens failed with
+the WAL pragma in the DSN, and none failed without it. So `Open` retries the
+connect-and-ping step, and the first migration, on `SQLITE_BUSY` or
+`SQLITE_LOCKED`. Waits grow from 5 ms to 200 ms, for at most 15 s. Each attempt
+opens a new `sql.DB`, and the WAL switch is idempotent, so a retry is safe.
+Other errors are not retried.
 - `_txlock=immediate`: write transactions take the write lock at `BEGIN`, so
   they wait instead of failing with `SQLITE_BUSY` on upgrade.
 

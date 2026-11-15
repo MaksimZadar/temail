@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -227,5 +228,15 @@ func TestPendingBodiesCursorPagesOnce(t *testing.T) {
 	}
 	if !reflect.DeepEqual(seen, []uint32{5, 4, 3, 2, 1}) {
 		t.Errorf("cursor paging visited %v", seen)
+	}
+}
+
+// Only SQLITE_BUSY and SQLITE_LOCKED are retried. Any other error fails at once.
+func TestRetryBusyDoesNotRetryOtherErrors(t *testing.T) {
+	calls := 0
+	boom := errors.New("disk I/O error")
+	err := retryBusy(context.Background(), func() error { calls++; return boom })
+	if !errors.Is(err, boom) || calls != 1 {
+		t.Fatalf("err = %v after %d calls; want the error after 1 call", err, calls)
 	}
 }
