@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -49,7 +50,7 @@ func TestListMailboxesFromCacheINBOXFirst(t *testing.T) {
 	}
 	fx.st.counts = []store.MailboxCounts{{Mailbox: "INBOX", Messages: 12, Bodies: 5}}
 
-	got, err := fx.svc.ListMailboxes()
+	got, err := fx.svc.ListMailboxes(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestListMessagesPagingAndLimits(t *testing.T) {
 			for i := 0; i < tt.listed; i++ {
 				fx.st.listed = append(fx.st.listed, header(uint32(10-i)))
 			}
-			page, err := fx.svc.ListMessages("INBOX", nil, tt.limit)
+			page, err := fx.svc.ListMessages(context.Background(), "INBOX", nil, tt.limit)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -110,7 +111,7 @@ func TestListMessagesPagingAndLimits(t *testing.T) {
 func TestListMessagesPassesCursorThrough(t *testing.T) {
 	fx := newMailFixture(t)
 	c := &PageCursor{Date: t0, UID: 42}
-	if _, err := fx.svc.ListMessages("INBOX", c, 10); err != nil {
+	if _, err := fx.svc.ListMessages(context.Background(), "INBOX", c, 10); err != nil {
 		t.Fatal(err)
 	}
 	if fx.st.lastOpts.Before == nil || !fx.st.lastOpts.Before.Date.Equal(t0) || fx.st.lastOpts.Before.UID != 42 {
@@ -121,7 +122,7 @@ func TestListMessagesPassesCursorThrough(t *testing.T) {
 func TestListMessagesRejectsBadMailbox(t *testing.T) {
 	fx := newMailFixture(t)
 	for _, name := range []string{"", strings.Repeat("a", maxMailboxName+1)} {
-		if _, err := fx.svc.ListMessages(name, nil, 10); !errors.Is(err, ErrInvalidInput) {
+		if _, err := fx.svc.ListMessages(context.Background(), name, nil, 10); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("mailbox %q: err = %v", name, err)
 		}
 	}
@@ -133,7 +134,7 @@ func TestGetMessageCacheHitDoesNotConnect(t *testing.T) {
 	fx.st.headers[key] = header(4)
 	fx.st.bodies[key] = store.Body{Text: "hello", HTML: "<p>hello</p>", Attachments: []model.Attachment{{Filename: "a.pdf", PartID: "2"}}}
 
-	msg, err := fx.svc.GetMessage("INBOX", testEpoch, 4)
+	msg, err := fx.svc.GetMessage(context.Background(), "INBOX", testEpoch, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +157,7 @@ func TestGetMessageFallbackFetchesAndCaches(t *testing.T) {
 		Attachments:   []model.Attachment{{Filename: "x.txt", PartID: "2", Size: 3}},
 	}
 
-	msg, err := fx.svc.GetMessage("INBOX", testEpoch, 9)
+	msg, err := fx.svc.GetMessage(context.Background(), "INBOX", testEpoch, 9)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +172,7 @@ func TestGetMessageFallbackFetchesAndCaches(t *testing.T) {
 	}
 
 	// A second read is served from the cache.
-	if _, err := fx.svc.GetMessage("INBOX", testEpoch, 9); err != nil {
+	if _, err := fx.svc.GetMessage(context.Background(), "INBOX", testEpoch, 9); err != nil {
 		t.Fatal(err)
 	}
 	if m, _ := fx.client.fetches(); m != 1 {
@@ -198,7 +199,7 @@ func TestGetMessageErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fx := newMailFixture(t)
 			tt.setup(fx)
-			_, err := fx.svc.GetMessage("INBOX", testEpoch, tt.uid)
+			_, err := fx.svc.GetMessage(context.Background(), "INBOX", testEpoch, tt.uid)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
@@ -233,7 +234,7 @@ func TestGetAttachmentChecksPartAndSize(t *testing.T) {
 			fx.st.bodies[key] = store.Body{Attachments: listed}
 			fx.client.attachment = []byte("hello")
 
-			got, err := fx.svc.GetAttachment("INBOX", testEpoch, 3, tt.partID)
+			got, err := fx.svc.GetAttachment(context.Background(), "INBOX", testEpoch, 3, tt.partID)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
@@ -253,7 +254,7 @@ func TestGetAttachmentRefusesStaleEpochAndOversizeContent(t *testing.T) {
 	fx.st.headers[key] = header(3)
 	fx.st.bodies[key] = store.Body{Attachments: []model.Attachment{{PartID: "2", Size: 5}}}
 	fx.client.info = mail.MailboxInfo{UIDValidity: testEpoch + 1}
-	if _, err := fx.svc.GetAttachment("INBOX", testEpoch, 3, "2"); !errors.Is(err, ErrStaleEpoch) {
+	if _, err := fx.svc.GetAttachment(context.Background(), "INBOX", testEpoch, 3, "2"); !errors.Is(err, ErrStaleEpoch) {
 		t.Fatalf("stale epoch: err = %v", err)
 	}
 
@@ -262,7 +263,7 @@ func TestGetAttachmentRefusesStaleEpochAndOversizeContent(t *testing.T) {
 	fx.st.bodies[key] = store.Body{Attachments: []model.Attachment{{PartID: "2", Size: 5}}}
 	fx.client.info = mail.MailboxInfo{UIDValidity: testEpoch}
 	fx.client.attachment = make([]byte, MaxAttachmentBytes+1)
-	if _, err := fx.svc.GetAttachment("INBOX", testEpoch, 3, "2"); !errors.Is(err, ErrAttachmentTooLarge) {
+	if _, err := fx.svc.GetAttachment(context.Background(), "INBOX", testEpoch, 3, "2"); !errors.Is(err, ErrAttachmentTooLarge) {
 		t.Fatalf("oversize content: err = %v", err)
 	}
 }
@@ -274,7 +275,7 @@ func TestGetAttachmentFetchErrorIsWrapped(t *testing.T) {
 	fx.st.bodies[key] = store.Body{Attachments: []model.Attachment{{PartID: "2", Size: 5}}}
 	boom := errors.New("bridge went away")
 	fx.client.attachErr = boom
-	if _, err := fx.svc.GetAttachment("INBOX", testEpoch, 3, "2"); !errors.Is(err, boom) {
+	if _, err := fx.svc.GetAttachment(context.Background(), "INBOX", testEpoch, 3, "2"); !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
 }

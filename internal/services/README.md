@@ -22,31 +22,71 @@ adding a method. The rules are:
 
 | Service | Bound methods |
 |---------|---------------|
-| `SetupService` | `GetStatus`, `SaveAccount`, `ProbeCert`, `TrustCert`, `TestConnection` |
-| `MailService` | `ListMailboxes`, `ListMessages`, `GetMessage`, `GetAttachment` |
-| `SyncService` | `Start`, `Stop`, `Status` |
+| `SetupService` | `GetStatus(ctx)`, `SaveAccount(ctx, host, imapPort, smtpPort, tlsMode, username, password)`, `ProbeCert(ctx)`, `TrustCert(ctx, fingerprint, replace)`, `TestConnection(ctx)` |
+| `MailService` | `ListMailboxes(ctx)`, `ListMessages(ctx, mailbox, cursor, limit)`, `GetMessage(ctx, mailbox, uidValidity, uid)`, `GetAttachment(ctx, mailbox, uidValidity, uid, partID)` |
+| `SyncService` | `Start()`, `Stop()`, `Status()` |
+
+`ctx` is the Wails call context. It is not part of the JavaScript signature.
 
 `ServiceStartup` and `ServiceShutdown` are lifecycle hooks, not bound.
-`MailService.ServiceShutdown` closes its Bridge connection. `SyncService`'s hooks
-start the sync at app start (if ready) and stop it at shutdown.
+`ServiceStartup` starts the autostart in the background, so it never waits for
+the keychain. `ServiceShutdown` on `MailService` and `SyncService` is idempotent
+and is also called by Wails after `services.Shutdown`. `services.Shutdown` is a
+plain function (not bound) that does the ordered teardown described below.
+
+### Lifecycle and launch generations
+
+`SyncService` keeps a generation counter. `Stop` bumps it. A launch reads its
+credentials, then checks the generation under the lock. If a stop or restart ran
+in between, the launch drops itself. So `restart` starts exactly one run, with
+credentials read after the restart. If the autostart's credential read takes
+longer than 10 s (a locked keychain), the autostart bumps the generation, so the
+late launch cannot start a run unless the user asks.
+
+`services.Shutdown(sync, mail, store)`: stop the sync, then `mail.shutdown()`
+(refuse new calls, cancel running ones, close the Bridge session, wait up to
+10 s for in-flight reads), then close the cache. If either step did not finish,
+the cache stays open and the error says so.
+
+### Configuration writes
+
+`SetupService` holds `cfgMu` for each load-check-save sequence (`SaveAccount`,
+`TrustCert`). Probes run outside the lock. `TrustCert` re-reads the config after
+the probe. If the account ID, host, IMAP port or TLS mode changed, it returns
+`ErrAccountChanged`.
+
+`SaveAccount` writes the config first and the keyring second. If the keyring
+write fails, the previous config is restored. An empty password keeps the stored
+one. If no password is stored, the call fails with `no_password`.
+
+`TrustCert(fingerprint, replace)`: if the account already has a different pin
+and `replace` is false, it returns `ErrAlreadyPinned` (text starts with
+`already_pinned`) before probing. The UI then shows the re-pin flow. Pinning the
+stored value again is a no-op.
+
+### Keyring probe
+
+`GetStatus` runs `Probe` in a goroutine and waits at most 2 s. On timeout it
+reports a "keychain did not respond; it may be locked" message. The probe keeps
+running, and its result is cached for 30 s.
 
 ### SetupService
 
 - `GetStatus()` returns `configured`, `keyringOk` with `keyringMessage`,
   `bridgeReachable`, `certPinned` and `accountId`. Reachability is a TCP dial
   with a 1 s timeout. A non-loopback host is never dialled.
-- `SaveAccount(host, imapPort, smtpPort, tlsMode, username, password)` validates
-  the input (loopback host, non-empty username and password, length limits, and
-  `config.Validate`). It stores the password in the keyring under `main` (or the
-  existing account's ID) and then saves `config.json`. Nothing is written when
-  validation fails. If the host or IMAP port changes, the pin is cleared. Sync
-  restarts afterwards.
+- `SaveAccount(...)` validates the input (loopback host, non-empty username,
+  length limits, and `config.Validate`). It saves `config.json` first and then
+  stores the password in the keyring under `main` (or the existing account's
+  ID). Nothing is written when validation fails. If the host or IMAP port
+  changes, the pin is cleared. Sync restarts afterwards.
 - `ProbeCert()` returns the presented fingerprint and subject. It connects with
   the pin cleared, so the handshake stops at the certificate check and no
   password is sent. Nothing is pinned.
-- `TrustCert(fingerprint)` probes again. It pins the value only if the fresh
-  fingerprint equals the one given (case-insensitive). Otherwise it returns
-  `ErrFingerprintChanged` and writes nothing.
+- `TrustCert(fingerprint, replace)` probes again. It pins the value only if the
+  fresh fingerprint equals the one given (case-insensitive) and no different pin
+  is in place (or `replace` is set). Otherwise it returns `ErrFingerprintChanged`,
+  `ErrAlreadyPinned` or `ErrAccountChanged` and writes nothing.
 - `TestConnection()` logs in and closes at once. It returns a category instead of
   an error, so the UI can show a clear message. The categories are listed in
   `ARCHITECTURE.md` §3.3. Dial failures come from a `*net.OpError` with
@@ -65,9 +105,14 @@ start the sync at app start (if ready) and stop it at shutdown.
   never resolve to a message from another epoch.
 - `GetAttachment(mailbox, uidValidity, uid, partID)`: `partID` must match
   `^[0-9]+(\.[0-9]+)*$` and must be one of the message's listed attachments.
-  Declared sizes over 25 MiB are refused before the fetch, and the fetched bytes
+  Declared sizes over 10 MiB are refused before the fetch, and the fetched bytes
   are checked again. The bytes go back in the response (base64 in JSON). Nothing
   is written to disk, so the save-dialog option from the plan was not used.
+
+  **Future work:** the whole part is buffered in memory and sent over the bridge.
+  Streaming it through the Wails asset handler (a URL the frontend downloads from)
+  would remove the cap and the copy. That needs its own review of the handler's
+  access checks before it ships.
 
 ### SyncService
 
@@ -76,8 +121,9 @@ start the sync at app start (if ready) and stop it at shutdown.
   active, `Start` does nothing. It refuses (without creating a client) when the
   account is missing, unpinned or has no password.
 - `Stop()` cancels the run and waits up to 15 s. It is a no-op when nothing is
-  running.
-- `Status()` returns `running`, `lastResult` and `lastError`.
+  running. On timeout it returns `ErrSyncStopTimeout`, and `Status()` reports
+  `stopTimedOut` until the run ends. The cache is then kept open at shutdown.
+- `Status()` returns `running`, `stopTimedOut`, `lastResult` and `lastError`.
 - Events: `sync:progress` on every progress step, then one of `sync:done`
   (also for partial runs, with `mailboxErrors`) or `sync:error`. A stopped run
   emits no done or error event.
@@ -110,8 +156,16 @@ after the hook runs.
 - `sync_test.go`: refusal when not ready, progress then done, single run at a
   time, `Stop` and shutdown with no outcome event, a sync error event, a partial
   run, and restart. Run with `-race`.
-- `bindings_test.go`: the bound method set, the read-only name check, and the
-  secret-field check on every bound return type.
+- `bindings_test.go`: the bound method set, the read-only name check, the
+  secret-field check on every bound return type, and which methods take the
+  Wails context first.
+- `hardening_test.go`: a blocked keychain does not block startup; a late
+  autostart is dropped; a stop during a credential read drops the launch; a
+  restart starts one run with a fresh password; a stuck stop is reported and
+  keeps the cache open; shutdown drains or refuses reads; a queued call honours
+  its context; the keyring probe times out and is cached; config changes during
+  a probe are refused; `replace` for pins; `SaveAccount` keeps the stored
+  password, fails without one, and restores config when the keyring fails.
 
 Run with `go test -race ./internal/services/`. The race detector needs cgo
 (`CGO_ENABLED=1`). The `mise run test` task runs with cgo off and no `-race`.

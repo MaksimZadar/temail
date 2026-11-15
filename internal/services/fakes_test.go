@@ -60,11 +60,7 @@ func (f *fakeConfig) current() config.Config {
 	return cloneConfig(f.cfg)
 }
 
-func cloneConfig(c config.Config) config.Config {
-	out := c
-	out.Bridge = append([]config.BridgeAccount(nil), c.Bridge...)
-	return out
-}
+func cloneConfig(c config.Config) config.Config { return copyConfig(c) }
 
 // fakeSecrets is an in-memory SecretStore.
 type fakeSecrets struct {
@@ -74,11 +70,30 @@ type fakeSecrets struct {
 	getErr   error
 	setErr   error
 	sets     int
+	// probeGate, if set, blocks Probe until closed. getGate blocks
+	// GetBridgePassword the same way. probeCalls counts Probe calls.
+	probeGate  chan struct{}
+	getGate    chan struct{}
+	probeCalls int
+	// getEntered receives a value when GetBridgePassword starts (buffered, non-blocking).
+	getEntered chan struct{}
 }
 
 func newFakeSecrets() *fakeSecrets { return &fakeSecrets{pw: map[string]string{}} }
 
 func (f *fakeSecrets) GetBridgePassword(id string) (string, error) {
+	f.mu.Lock()
+	gate, entered := f.getGate, f.getEntered
+	f.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if gate != nil {
+		<-gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.getErr != nil {
@@ -112,7 +127,22 @@ func (f *fakeSecrets) DeleteBridgePassword(id string) error {
 func (f *fakeSecrets) GetLLMKey(string) (string, error) { return "", secrets.ErrNotFound }
 func (f *fakeSecrets) SetLLMKey(string, string) error   { return nil }
 func (f *fakeSecrets) DeleteLLMKey(string) error        { return nil }
-func (f *fakeSecrets) Probe() error                     { return f.probeErr }
+func (f *fakeSecrets) Probe() error {
+	f.mu.Lock()
+	gate := f.probeGate
+	f.probeCalls++
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	return f.probeErr
+}
+
+func (f *fakeSecrets) probes() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.probeCalls
+}
 
 // fakeClient is a scriptable mail.Client. Fields are read under mu.
 type fakeClient struct {
@@ -122,6 +152,14 @@ type fakeClient struct {
 	// until it is closed or the context ends.
 	connectErr error
 	gate       chan struct{}
+	// stubborn makes gate and fetchGate ignore the context, like a hung socket.
+	stubborn bool
+	// onConnect, if set, runs at the start of Connect (without the lock held).
+	onConnect func()
+	// fetchGate, if set, blocks FetchMessage until closed or the context ends.
+	fetchGate chan struct{}
+	// fetchEntered receives a value when FetchMessage starts (buffered, non-blocking).
+	fetchEntered chan struct{}
 	// passwords records every password passed to Connect.
 	passwords []string
 	connects  int
@@ -143,16 +181,23 @@ type fakeClient struct {
 }
 
 func (c *fakeClient) Connect(ctx context.Context, _ config.BridgeAccount, password string) error {
+	if c.onConnect != nil {
+		c.onConnect()
+	}
 	c.mu.Lock()
 	c.connects++
 	c.passwords = append(c.passwords, password)
 	gate, err := c.gate, c.connectErr
 	c.mu.Unlock()
 	if gate != nil {
-		select {
-		case <-gate:
-		case <-ctx.Done():
-			return ctx.Err()
+		if c.stubborn {
+			<-gate
+		} else {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 	return err
@@ -188,7 +233,24 @@ func (c *fakeClient) ListUIDs(context.Context, string) (mail.UIDListing, error) 
 	return c.listing, c.listErr
 }
 
-func (c *fakeClient) FetchMessage(_ context.Context, mailbox string, uid uint32) (model.Message, error) {
+func (c *fakeClient) FetchMessage(ctx context.Context, mailbox string, uid uint32) (model.Message, error) {
+	if c.fetchEntered != nil {
+		select {
+		case c.fetchEntered <- struct{}{}:
+		default:
+		}
+	}
+	if c.fetchGate != nil {
+		if c.stubborn {
+			<-c.fetchGate
+		} else {
+			select {
+			case <-c.fetchGate:
+			case <-ctx.Done():
+				return model.Message{}, ctx.Err()
+			}
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.fetchMessages++

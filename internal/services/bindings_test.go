@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"reflect"
 	"regexp"
 	"sort"
@@ -104,5 +105,34 @@ func checkNoSecretFields(t *testing.T, where string, typ reflect.Type, seen map[
 			t.Errorf("%s: %s.%s looks like a secret field", where, typ.Name(), f.Name)
 		}
 		checkNoSecretFields(t, where, f.Type, seen)
+	}
+}
+
+// wailsCtxMethods take the Wails call context first. It is not visible to
+// JavaScript; it ends when the call is cancelled or the app shuts down.
+var wailsCtxMethods = map[string][]string{
+	"SetupService": {"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert"},
+	"MailService":  {"GetAttachment", "GetMessage", "ListMailboxes", "ListMessages"},
+	"SyncService":  {},
+}
+
+func TestBoundMethodsTakeWailsContext(t *testing.T) {
+	ctxType := reflect.TypeFor[context.Context]()
+	for name, typ := range boundServices() {
+		want := map[string]bool{}
+		for _, m := range wailsCtxMethods[name] {
+			want[m] = true
+		}
+		for i := 0; i < typ.NumMethod(); i++ {
+			m := typ.Method(i)
+			if lifecycle[m.Name] {
+				continue
+			}
+			// Method.Type includes the receiver as input 0.
+			hasCtx := m.Type.NumIn() > 1 && m.Type.In(1) == ctxType
+			if hasCtx != want[m.Name] {
+				t.Errorf("%s.%s: context first = %v, want %v", name, m.Name, hasCtx, want[m.Name])
+			}
+		}
 	}
 }
