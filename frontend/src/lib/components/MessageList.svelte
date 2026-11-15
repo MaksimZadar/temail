@@ -82,19 +82,26 @@
   });
 
   function click(i: number): void {
-    layout.setFocus("view");
+    if (layout.narrow) layout.setFocus("view");
     void mail.open(mail.shown[i]);
   }
 </script>
 
-<section class="pane" class:focused aria-label="Messages">
+<section
+  class="pane"
+  class:focused
+  data-focused={focused}
+  data-pane="list"
+  aria-label="Messages"
+  onfocusin={() => (layout.focus = "list")}
+  onpointerdown={() => (layout.focus = "list")}
+>
   <div
     class="scroller"
     role="listbox"
     aria-label="Messages in {mail.folder?.displayName ?? 'folder'}"
     aria-activedescendant={activeId}
     aria-busy={mail.loading}
-    data-pane="list"
     tabindex="0"
     bind:this={box}
     {onscroll}
@@ -169,10 +176,25 @@
     min-width: 0;
     height: 100%;
     background: var(--bg);
-    border-top: 2px solid transparent;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    transition:
+      border-color 0.12s,
+      box-shadow 0.12s;
   }
   .pane.focused {
-    border-top-color: var(--accent);
+    border-color: var(--accent);
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 0 0 4px var(--accent-soft);
+  }
+  @media (forced-colors: active) {
+    .pane.focused {
+      border-color: Highlight;
+      outline: 2px solid Highlight;
+      outline-offset: -1px;
+    }
   }
   .scroller {
     flex: 1;
@@ -180,8 +202,9 @@
     overflow-y: auto;
     position: relative;
   }
+  /* The pane border is the focus indicator; no second ring inside it. */
   .scroller:focus-visible {
-    outline-offset: -2px;
+    outline: none;
   }
   .rows {
     will-change: transform;

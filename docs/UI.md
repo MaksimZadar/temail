@@ -26,6 +26,7 @@ Dense but friendly (think Linear, Thunderbird's compact view), quiet, content fi
 | `--sel-bg` | accent at 14% | accent at 16% |
 | `--danger` / `--ok` | #b42f26 / #1d7a46 | #f0847b / #6fcf97 |
 
+- **Panes as cards.** Each pane is its own card on a slightly tinted canvas: 8 px margin on every side and between panes, 8 px corner radius, a normal 1 px `--line` border. The focused pane gets the whole border in the violet accent plus a faint 4 px ring (a 2 px `Highlight` outline in forced-colors/high-contrast mode); only one pane is focused at a time. The highlight follows the keyboard (`h`/`l`, `b`, `j`/`k`) and the mouse (clicking anywhere in a pane or focusing something inside it); clicking a folder keeps the highlight on the folder pane. Inner controls inside a pane don't draw a second ring around the list or frame (the pane border is the indicator); buttons and inputs keep their own focus ring. The border colour fades over 120 ms, and not at all with reduced motion.
 - **States.** Unread: bold sender and subject plus a small violet dot. Read: regular weight, dimmed subject. Selected row: `--sel-bg` background plus a 2 px violet bar on the left. Hover: a lighter tint of the same colour. Focus: 2 px violet outline, `:focus-visible` only. Never colour alone: unread is weight plus dot, selected is bar plus tint.
 
 ## 2. Layout (implemented)

@@ -130,9 +130,12 @@
 <section
   class="pane"
   class:focused
+  data-focused={focused}
   aria-label="Message"
   data-pane="view"
   bind:this={pane}
+  onfocusin={() => (layout.focus = "view")}
+  onpointerdown={() => (layout.focus = "view")}
 >
   {#if mail.messageLoading}
     <p class="state" role="status">Opening message…</p>
@@ -277,11 +280,26 @@
     flex-direction: column;
     min-width: 0;
     height: 100%;
-    background: var(--bg-pane);
-    border-top: 2px solid transparent;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    transition:
+      border-color 0.12s,
+      box-shadow 0.12s;
   }
   .pane.focused {
-    border-top-color: var(--accent);
+    border-color: var(--accent);
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 0 0 4px var(--accent-soft);
+  }
+  @media (forced-colors: active) {
+    .pane.focused {
+      border-color: Highlight;
+      outline: 2px solid Highlight;
+      outline-offset: -1px;
+    }
   }
   .state {
     margin: auto;
@@ -424,7 +442,7 @@
     background: #fff;
   }
   iframe:focus-visible {
-    outline-offset: -2px;
+    outline: none;
   }
   .plain {
     flex: 1;

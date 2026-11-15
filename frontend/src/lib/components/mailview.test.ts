@@ -292,3 +292,65 @@ describe("keyboard in the mailbox view", () => {
     expect(mail.filter).toBe("");
   });
 });
+
+describe("focused pane highlight", () => {
+  const pane = (name: string) =>
+    document.querySelector<HTMLElement>(`[data-pane="${name}"]`)!;
+
+  async function mount() {
+    app.route = "main";
+    ui.overlay = "none";
+    m.listMailboxes.mockResolvedValue([
+      {
+        name: "INBOX",
+        displayName: "Inbox",
+        kind: "inbox",
+        uidValidity: 7,
+        messages: 1,
+        bodies: 0,
+        lastSync: null,
+      },
+    ]);
+    m.listMessages.mockResolvedValue({ messages: [hdr(1)], next: null });
+    m.getMessage.mockResolvedValue(full());
+    layout.folderVisible = true;
+    render(App);
+    await screen.findAllByRole("option");
+  }
+
+  it("marks exactly one pane as focused and follows h/l", async () => {
+    await mount();
+    const focusedPanes = () =>
+      ["folders", "list", "view"].filter(
+        (n) => pane(n).dataset.focused === "true",
+      );
+    await waitFor(() => expect(focusedPanes()).toEqual(["list"]));
+    expect(pane("list")).toHaveClass("focused");
+    await fireEvent.keyDown(window, { key: "h" });
+    expect(focusedPanes()).toEqual(["folders"]);
+    expect(pane("folders")).toHaveClass("focused");
+    await fireEvent.keyDown(window, { key: "l" });
+    expect(focusedPanes()).toEqual(["list"]);
+    await fireEvent.keyDown(window, { key: "l" });
+    await waitFor(() => expect(focusedPanes()).toEqual(["view"]));
+  });
+
+  it("follows mouse clicks and focus-within", async () => {
+    await mount();
+    await fireEvent.pointerDown(pane("folders"));
+    expect(layout.focus).toBe("folders");
+    expect(pane("folders").dataset.focused).toBe("true");
+    expect(pane("list").dataset.focused).toBe("false");
+    await fireEvent.focusIn(pane("view"));
+    expect(layout.focus).toBe("view");
+    expect(pane("view")).toHaveClass("focused");
+  });
+
+  it("clicking a folder keeps the highlight on the folder pane", async () => {
+    await mount();
+    const btn = screen.getByRole("button", { name: /Inbox/ });
+    await fireEvent.pointerDown(btn);
+    await fireEvent.click(btn);
+    expect(layout.focus).toBe("folders");
+  });
+});

@@ -67,13 +67,12 @@
 
 <style>
   .handle {
-    width: 5px;
-    margin: 0 -2px;
-    z-index: 2;
+    flex: none;
+    width: 8px;
     cursor: col-resize;
-    background: var(--line);
+    background: transparent;
     background-clip: content-box;
-    padding: 0 2px;
+    padding: 0 3px;
     touch-action: none;
   }
   .handle:hover,

@@ -196,11 +196,15 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    background: var(--bg-pane);
   }
+  /* Panes are separate cards: the same 8px margin on every side and between them
+     (the resize handles sit in the gaps). */
   .panes {
     flex: 1;
     min-height: 0;
     display: flex;
+    padding: 8px;
   }
   .slot {
     flex: none;

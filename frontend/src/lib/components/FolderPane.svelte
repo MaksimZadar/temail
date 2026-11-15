@@ -15,12 +15,20 @@
 
   function pick(f: MailboxDTO): void {
     mail.folderCursor = f.name;
-    layout.setFocus("list");
+    if (layout.narrow) layout.setFocus("list");
     void mail.selectFolder(f.name);
   }
 </script>
 
-<nav class="pane" class:focused aria-label="Folders" data-pane="folders">
+<nav
+  class="pane"
+  class:focused
+  data-focused={focused}
+  aria-label="Folders"
+  data-pane="folders"
+  onfocusin={() => (layout.focus = "folders")}
+  onpointerdown={() => (layout.focus = "folders")}
+>
   {#if !mail.foldersLoaded}
     <p class="note">Loading folders…</p>
   {:else if mail.foldersError}
@@ -62,11 +70,27 @@
     height: 100%;
     overflow-y: auto;
     padding: 0.5rem 0.4rem;
-    background: var(--bg-pane);
-    border-top: 2px solid transparent;
+    box-sizing: border-box;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    transition:
+      border-color 0.12s,
+      box-shadow 0.12s;
   }
   .pane.focused {
-    border-top-color: var(--accent);
+    border-color: var(--accent);
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 0 0 4px var(--accent-soft);
+  }
+  @media (forced-colors: active) {
+    .pane.focused {
+      border-color: Highlight;
+      outline: 2px solid Highlight;
+      outline-offset: -1px;
+    }
   }
   ul {
     margin: 0 0 0.5rem;
@@ -122,8 +146,8 @@
     background: var(--accent);
   }
   .cursor {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
+    background: var(--sel-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .note {
     padding: 0.5rem;
