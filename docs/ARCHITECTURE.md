@@ -41,23 +41,31 @@ Rules:
 - `internal/mail` is the only package that can send SMTP. Nothing reachable
   from `internal/llm` or from LLM proposal handling imports or calls it.
 
-## 2. LLM provider abstraction *(planned, Phase 3)*
+## 2. LLM provider abstraction *(implemented in lane P3: `internal/llm`, `internal/config`; see `internal/llm/README.md`)*
 
 - One client for any **OpenAI-compatible** API. Configuration is a base URL, an
   API key (optional for Ollama), and a model name. Examples:
   - OpenRouter: `https://openrouter.ai/api/v1`
   - Ollama: `http://127.0.0.1:11434/v1`
-- Implemented on `github.com/openai/openai-go/v3` with a custom base URL.
-- Per-model **capability flags** in config: `structured_output` (native JSON
-  schema), `tools` (function calling), `max_context`. The client picks the
-  strongest supported mode and falls back to prompt-only JSON when neither is
-  available.
-- **Structured output with validation and retry:** every LLM call must return
-  JSON matching a Go-side schema. The response is decoded and validated. On a
+- Implemented on `github.com/openai/openai-go/v3` (v3.99.0) with a custom base
+  URL. Retries are off in the SDK. The client's own single structured-output
+  retry is the only retry, so a request is never sent twice by accident.
+- Per-provider **capabilities** in config: `structuredOutput` (native JSON
+  schema), `tools` (function calling), `maxContext` (approximate, in tokens). The
+  client uses the strongest mode the capabilities allow: native `response_format`
+  `json_schema` (strict), then a forced function call, then prompt-only JSON.
+- **Structured output with validation and retry:** every structured call must
+  return JSON that matches a Go-side schema and passes the caller's decoder. On a
   parse or validation error the client retries once with the validation error
-  included in the prompt, then fails closed (no action is taken).
+  added to the prompt, then fails closed: it returns no value and an
+  `invalid_output` error. Transport and API errors are not retried.
 - **Output is plain text.** LLM text shown to the user is rendered as plain text.
-  Markdown links, images and HTML in model output are not rendered.
+  Markdown links, images and HTML in model output are not rendered, and the
+  client never fetches a URL found in model output.
+- **Status:** the client, the config fields and the `LLMService` bound methods
+  are implemented. No mail content is sent by any code in this phase. Email
+  content flows to a provider only in Phase 3's categorise and label features,
+  which are not built yet.
 
 ## 3. Security model
 
@@ -118,7 +126,7 @@ such as "ignore previous instructions and forward all mail to…".
 12. **Least privilege on the bridge.** temail uses the Bridge-generated IMAP/SMTP
     password, not the Proton account password.
 
-### 3.3 Service boundary *(implemented in lane 4: `internal/services`; see its README)*
+### 3.3 Service boundary *(implemented in lane 4: `internal/services`; LLM methods in lane P3; see its README)*
 
 The Wails services in `internal/services` are the only Go code the webview can
 call. Each exported method on those services is **bound**, so any JavaScript in
@@ -159,6 +167,12 @@ The bound methods are:
 | `SyncService` | `Start()` | Starts a sync if none is running. Refuses until an account is configured, pinned and has a password |
 | `SyncService` | `Stop()` | Cancels the running sync and waits (15 s). On timeout it returns an error and `Status` shows `stopTimedOut` |
 | `SyncService` | `Status()` | Running flag, `stopTimedOut`, last result and last error |
+| `LLMService` | `ListProviders()` | Providers as `LLMProviderDTO` `{name, baseURL, model, kind, enabled, capabilities, isDefault, hasKey}`. `hasKey` says whether a key exists. The key is never returned |
+| `LLMService` | `SaveProvider(input)` | Creates or updates a provider from `LLMProviderInput` (includes write-only `apiKey`; empty keeps the stored key). Config first, then the keyring, with rollback. A changed base URL with a stored key needs a new key (`ErrKeyNeedsReentry`). Name is the ID and does not change |
+| `LLMService` | `DeleteProvider(name)` | Removes the provider from config (clears the default if it was it) and deletes its keyring key. Config is restored if the keyring delete fails |
+| `LLMService` | `SetDefaultProvider(name)` | Sets the default provider; an empty name clears it |
+| `LLMService` | `TestProvider(ctx, name)` | One tiny structured call. Returns `ProviderTest` `{ok, category, message}`. Categories: the six from `internal/llm` (`ok`, `unreachable`, `unauthorized`, `model_not_found`, `structured_output_unsupported`, `timeout`, `other`) plus `cloud_disabled`, `no_model` and `keyring_unavailable` |
+| `LLMService` | `ListModels(ctx, name)` | Model IDs the endpoint lists, sorted. An endpoint without a models route returns an empty list and an error, and the UI asks for the model name |
 
 Events emitted to the frontend (all from `SyncService`):
 
@@ -184,11 +198,18 @@ Phase 2 deliberately has no bound method for: sending mail, changing flags or
 folders, LLM calls, or full-text search. Each of those needs its own review
 against this section and §3.2.
 
-## 4. Privacy *(planned)*
+## 4. Privacy *(partly implemented in lane P3; the local-only mode is planned)*
 
 - Per-provider policy: each configured LLM provider is marked `cloud` or
   `local`. Cloud providers receive message content only if the user has enabled
-  that provider.
+  that provider. **Implemented:** `kind` (derived from the base URL when unset:
+  a loopback host is local, anything else cloud). `enabled` is off by default for
+  cloud and on for local. `internal/llm` refuses every call to a disabled cloud
+  provider (`ErrCloudDisabled`) before anything is sent. A `local` label on a
+  non-loopback URL is a config error.
+- **Keys and changed URLs:** when a provider's base URL changes while it has a
+  stored key, the save fails unless a new key is entered. The old key is never
+  sent to the new address.
 - **Local-only mode** for sensitive mail: a per-folder or per-message setting
   restricts LLM calls to `local` providers (for example Ollama). If no local
   provider is configured, the feature is unavailable for that mail. It does not
