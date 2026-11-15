@@ -14,11 +14,13 @@ import (
 	"github.com/MaksimZadar/temail/internal/secrets"
 )
 
-// LLMKeyStore holds provider API keys. secrets.Store satisfies it. Keys are
-// read here and passed to the llm client. They are never returned to the
-// frontend.
+// LLMKeyStore holds provider API keys. *secrets.KeyringStore satisfies it.
+// GetLLMKey reads the effective key (environment first, then keyring).
+// StoredLLMKey reads only the keyring, which rollback needs. Keys are read here
+// and passed to the llm client. They are never returned to the frontend.
 type LLMKeyStore interface {
 	GetLLMKey(provider string) (string, error)
+	StoredLLMKey(provider string) (string, error)
 	SetLLMKey(provider, key string) error
 	DeleteLLMKey(provider string) error
 }
@@ -38,23 +40,37 @@ var providerNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 // Errors the LLM methods return. Messages are safe to show.
 var (
 	ErrProviderNotFound = errors.New("no LLM provider with that name")
-	// ErrKeyNeedsReentry means the base URL changed while a stored key exists.
-	// The key is not sent to a new host, so the user must enter it again.
-	ErrKeyNeedsReentry = errors.New("the base URL changed; enter the API key again so it is not sent to the new address")
+	// ErrKeyNeedsReentry means a key exists (keyring or environment) that was not
+	// approved for this base URL. The key is not used, so the user must enter it
+	// again for this address.
+	ErrKeyNeedsReentry = errors.New("an API key exists that was not approved for this base URL; enter the API key again")
+	// ErrEnableDeclined means enabling a cloud provider was not confirmed in the
+	// native dialog (or no dialog was available). Nothing was saved.
+	ErrEnableDeclined = errors.New("enabling a cloud LLM provider was not confirmed; nothing was saved")
+	// ErrProviderChanged means the provider changed while the enable dialog was
+	// open. Nothing was saved; try again.
+	ErrProviderChanged = errors.New("the provider changed while it was being confirmed; try again")
 )
 
 // LLMService manages LLM providers for the UI. It stores settings in
 // config.json and keys in the keyring, and it calls a provider only for the
 // explicit bound methods. No mail content flows through it.
 type LLMService struct {
-	cfg   ConfigStore
-	keys  LLMKeyStore
+	cfg     ConfigStore
+	keys    LLMKeyStore
+	confirm CloudConfirmer // nil means "no dialog": enabling cloud is refused
+
+	// cfgMu serialises config and key writes. A writer holds it across its
+	// keyring write and its config save, and a reader takes a snapshot of the
+	// config and the key under it. Network calls never run under it.
 	cfgMu sync.Mutex
 }
 
-// NewLLMService returns an LLMService.
-func NewLLMService(cfg ConfigStore, keys LLMKeyStore) *LLMService {
-	return &LLMService{cfg: cfg, keys: keys}
+// NewLLMService returns an LLMService. confirm asks the user before a cloud
+// provider is enabled; pass nil only where no dialog exists (tests, headless),
+// and then enabling cloud is refused.
+func NewLLMService(cfg ConfigStore, keys LLMKeyStore, confirm CloudConfirmer) *LLMService {
+	return &LLMService{cfg: cfg, keys: keys, confirm: confirm}
 }
 
 // LLMCapabilitiesDTO is the capability set of one provider.
@@ -129,12 +145,23 @@ func (s *LLMService) ListProviders() ([]LLMProviderDTO, error) {
 	return out, nil
 }
 
-// SaveProvider creates or updates a provider. The config is written first, then
-// the key (if one was given). If the key write fails, the previous config is
-// restored. A changed base URL needs a new key when one is stored: the old key
-// is not sent to the new address.
+// SaveProvider creates or updates a provider.
+//
+// Enabling a cloud provider (disabled to enabled, a new cloud provider, or a
+// change to cloud while enabled) first needs the user's confirmation in the
+// native dialog. Disabling never does. Without a dialog the change is refused.
+//
+// A key is used only with the base URL it was approved for (KeyBinding):
+//   - a non-empty apiKey replaces the stored key, with the new binding;
+//   - an empty apiKey keeps a key only if the provider is bound to the new base
+//     URL. This applies to keyring and environment keys, and to new providers
+//     too. Otherwise the call fails with ErrKeyNeedsReentry.
+//
+// Write order: the keyring first, then config.json. If the config save fails,
+// the keyring goes back to its previous state.
 func (s *LLMService) SaveProvider(in LLMProviderInput) error {
 	name := strings.TrimSpace(in.Name)
+	baseURL := strings.TrimSpace(in.BaseURL)
 	switch {
 	case !providerNameRE.MatchString(name):
 		return fmt.Errorf("%w: name must be 1 to %d letters, digits, '_' or '-', starting with a letter or digit", ErrInvalidInput, maxProviderName)
@@ -143,33 +170,76 @@ func (s *LLMService) SaveProvider(in LLMProviderInput) error {
 	case len(in.APIKey) > maxAPIKeyLen:
 		return fmt.Errorf("%w: apiKey is too long", ErrInvalidInput)
 	}
+	targetKind := (config.LLMProvider{Kind: in.Kind, BaseURL: baseURL}).EffectiveKind()
+
+	// Decide on the confirmation from a snapshot. The dialog runs without the
+	// lock, so the decision is checked again under the lock below.
+	pre, err := s.loadConfig()
+	if err != nil {
+		return err
+	}
+	preP, preExists := providerNamed(pre, name)
+	needsConfirm := enablesCloud(preP, preExists, targetKind, in.Enabled)
+	if needsConfirm {
+		if s.confirm == nil {
+			return ErrEnableDeclined
+		}
+		ok, cerr := s.confirm.ConfirmCloudEnable(context.Background(), name, baseURL)
+		if cerr != nil {
+			return fmt.Errorf("%w: %v", ErrEnableDeclined, cerr)
+		}
+		if !ok {
+			return ErrEnableDeclined
+		}
+	}
 
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	old, err := s.loadConfig()
+	cur, err := s.loadConfig()
 	if err != nil {
 		return err
 	}
-	cfg := copyConfig(old)
-	idx := findProvider(cfg, name)
-	existed := idx >= 0
-	enabled := in.Enabled
-	p := config.LLMProvider{Name: name}
-	if existed {
-		p = cfg.LLM.Providers[idx]
+	curP, curExists := providerNamed(cur, name)
+	if enablesCloud(curP, curExists, targetKind, in.Enabled) && !needsConfirm {
+		// The provider became an enabled cloud provider while the dialog was not
+		// shown for it. Ask again rather than enable it silently.
+		return ErrProviderChanged
 	}
-	if existed && p.BaseURL != strings.TrimSpace(in.BaseURL) && in.APIKey == "" {
-		if _, kerr := s.keys.GetLLMKey(name); kerr == nil {
+
+	// Key decisions. A keyring failure other than "no entry" stops here, before
+	// anything is written.
+	_, kerr := s.keys.GetLLMKey(name) // only "is there a key?" matters; the value is dropped
+	if err := keyReadErr(kerr); err != nil {
+		return err
+	}
+	hasKey := kerr == nil
+	writeKey := in.APIKey != ""
+	binding := ""
+	switch {
+	case writeKey:
+		binding = config.BaseURLBinding(baseURL)
+	case hasKey:
+		if !curExists || curP.KeyBinding == "" || curP.KeyBinding != config.BaseURLBinding(baseURL) {
 			return ErrKeyNeedsReentry
 		}
+		binding = curP.KeyBinding
 	}
-	p.BaseURL = strings.TrimSpace(in.BaseURL)
+
+	cfg := copyConfig(cur)
+	p := config.LLMProvider{Name: name}
+	idx := findProvider(cfg, name)
+	if idx >= 0 {
+		p = cfg.LLM.Providers[idx]
+	}
+	enabled := in.Enabled
+	p.BaseURL = baseURL
 	p.Model = strings.TrimSpace(in.Model)
 	p.Kind = in.Kind
 	p.Enabled = &enabled
 	p.Capabilities = capsFromDTO(in.Capabilities)
-	if existed {
+	p.KeyBinding = binding
+	if idx >= 0 {
 		cfg.LLM.Providers[idx] = p
 	} else {
 		cfg.LLM.Providers = append(cfg.LLM.Providers, p)
@@ -178,19 +248,66 @@ func (s *LLMService) SaveProvider(in LLMProviderInput) error {
 		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 
-	if err := s.cfg.Save(cfg); err != nil {
-		return fmt.Errorf("save config: %w", err)
-	}
-	if in.APIKey == "" {
+	if !writeKey {
+		if err := s.cfg.Save(cfg); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
 		return nil
 	}
+
+	// Keyring first (replace), then config. If the config save fails, the keyring
+	// goes back to what it was.
+	prev, perr := s.keys.StoredLLMKey(name)
+	if err := keyReadErr(perr); err != nil {
+		return err
+	}
+	hadStored := perr == nil
 	if err := s.keys.SetLLMKey(name, in.APIKey); err != nil {
-		if rerr := s.cfg.Save(old); rerr != nil {
-			return fmt.Errorf("store API key: %w (restoring the previous config also failed: %v)", err, rerr)
-		}
 		return fmt.Errorf("store API key: %w", err)
 	}
+	if err := s.cfg.Save(cfg); err != nil {
+		if rerr := s.restoreKey(name, prev, hadStored); rerr != nil {
+			return fmt.Errorf("save config: %w (restoring the previous API key also failed: %v)", err, rerr)
+		}
+		return fmt.Errorf("save config: %w", err)
+	}
 	return nil
+}
+
+// restoreKey puts the keyring entry back: the previous value if there was one,
+// otherwise no entry.
+func (s *LLMService) restoreKey(name, prev string, hadStored bool) error {
+	if hadStored {
+		return s.keys.SetLLMKey(name, prev)
+	}
+	return s.keys.DeleteLLMKey(name)
+}
+
+// enablesCloud reports whether a save makes a provider an enabled cloud
+// provider that was not one before. Only that change needs confirmation.
+func enablesCloud(prev config.LLMProvider, existed bool, targetKind string, targetEnabled bool) bool {
+	if targetKind != config.KindCloud || !targetEnabled {
+		return false
+	}
+	wasCloudEnabled := existed && prev.EffectiveKind() == config.KindCloud && prev.IsEnabled()
+	return !wasCloudEnabled
+}
+
+func providerNamed(cfg config.Config, name string) (config.LLMProvider, bool) {
+	if idx := findProvider(cfg, name); idx >= 0 {
+		return cfg.LLM.Providers[idx], true
+	}
+	return config.LLMProvider{}, false
+}
+
+// keyReadErr returns nil for "found" and "no entry", and a keyring-unavailable
+// error for anything else. Anything else must stop a save: the call cannot tell
+// whether a key is there, so it must not guess.
+func keyReadErr(err error) error {
+	if err == nil || errors.Is(err, secrets.ErrNotFound) {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", secrets.ErrKeyringUnavailable, err)
 }
 
 // DeleteProvider removes a provider and its keyring key. The config is written
@@ -281,22 +398,39 @@ func (s *LLMService) ListModels(ctx context.Context, name string) ([]string, err
 	return ids, nil
 }
 
-// clientFor builds an llm client for a configured provider, with its key from
-// the keyring (or the environment). The key stays inside the client.
+// clientFor builds an llm client for a configured provider. The config and the
+// key are read together under cfgMu, so a writer that is half done cannot be
+// seen: the key is never paired with a base URL it was not saved for. The lock
+// is released before the client is returned, so no network call runs under it.
+// A key that is not bound to the current base URL is refused with
+// ErrKeyNeedsReentry.
 func (s *LLMService) clientFor(name string) (*llm.Client, error) {
+	s.cfgMu.Lock()
 	cfg, err := s.loadConfig()
 	if err != nil {
+		s.cfgMu.Unlock()
 		return nil, err
 	}
 	idx := findProvider(cfg, name)
 	if idx < 0 {
+		s.cfgMu.Unlock()
 		return nil, ErrProviderNotFound
 	}
+	prov := cfg.LLM.Providers[idx]
 	key, kerr := s.keys.GetLLMKey(name)
-	if kerr != nil && !errors.Is(kerr, secrets.ErrNotFound) {
-		return nil, fmt.Errorf("%w: %v", secrets.ErrKeyringUnavailable, kerr)
+	s.cfgMu.Unlock()
+
+	if err := keyReadErr(kerr); err != nil {
+		return nil, err
 	}
-	client, err := llm.NewClient(llm.ProviderFrom(cfg.LLM.Providers[idx]), key, llm.Options{Timeout: llmCallTimeout})
+	if kerr == nil {
+		if !prov.KeyBoundTo() {
+			return nil, ErrKeyNeedsReentry
+		}
+	} else {
+		key = "" // no key: a local endpoint such as Ollama
+	}
+	client, err := llm.NewClient(llm.ProviderFrom(prov), key, llm.Options{Timeout: llmCallTimeout})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}

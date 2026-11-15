@@ -149,16 +149,32 @@ the user's explicit click.
   `isDefault` and `hasKey`. `hasKey` only says whether a key is available (from
   the keyring or `TEMAIL_LLM_<NAME>_KEY`). The key itself is never returned.
 - `SaveProvider(LLMProviderInput)` validates the name (`[A-Za-z0-9][A-Za-z0-9_-]{0,63}`),
-  the model length and the key length, then `config.Validate`. It writes
-  `config.json` first and the key second. A failed key write restores the old
-  config. An empty `apiKey` keeps the stored key. A new provider with an empty
-  key has no key (valid for Ollama). **A changed base URL with a stored key fails
-  with `ErrKeyNeedsReentry` unless a new key is given**, so the old key is never
-  sent to a new address. The name is the ID and cannot be changed by an update.
-  The whole sequence holds `cfgMu`.
+  the model length and the key length, then `config.Validate` (which also refuses
+  two names that read the same environment variable). The steps are:
+  1. **Confirmation.** Turning cloud on (a new cloud provider, a disabled one, or
+     a local one changed to cloud while enabled) asks the `CloudConfirmer` first.
+     `NewNativeConfirmer(app.Dialog)` shows a Wails question dialog with Enable and
+     Cancel. The answer is waited for on a channel, with a 60 s limit. Cancel,
+     close, a timeout, an error, or no confirmer (`nil`) all return
+     `ErrEnableDeclined` and save nothing. Disabling never asks. The dialog runs
+     without `cfgMu`, and the lock is taken afterwards. If the provider became an
+     enabled cloud provider in the meantime, the call returns `ErrProviderChanged`.
+  2. **Key check, for every save.** The effective key (environment or keyring) is
+     read. A read error other than "no entry" returns `ErrKeyringUnavailable` and
+     saves nothing (fail closed). With an empty `apiKey`, a key that is found
+     must be bound to the new base URL, or the call returns `ErrKeyNeedsReentry`.
+     This is also true for a new provider, so a key that already exists is never
+     inherited silently.
+  3. **Write order.** A non-empty `apiKey` replaces the keyring entry first and
+     then saves `config.json`. If the save fails, the keyring goes back to its
+     previous value (or is deleted if there was none). This is the reverse of the
+     account save, which writes config first. The binding is set to the new URL
+     whenever a key is written. An empty `apiKey` saves config only.
+  The name is the ID and cannot be changed by an update. The whole sequence holds
+  `cfgMu`.
 - `DeleteProvider(name)` writes the config without the provider (clearing the
   default if it was that one), then deletes the keyring key. If the key delete
-  fails, the config is restored.
+  fails, the config is restored. The environment variable is not touched.
 - `SetDefaultProvider(name)`; an empty name clears the default.
 - `TestProvider(ctx, name)` returns `ProviderTest` `{ok, category, message}`.
   Categories: the llm package's `ok`, `unreachable`, `unauthorized`,
@@ -170,6 +186,16 @@ the user's explicit click.
 - `ListModels(ctx, name)` returns the sorted IDs. When the endpoint has no models
   route, it returns an empty list and `llm.ErrModelListUnsupported`, which the UI
   shows as "enter the model name".
+- **`clientFor` never mixes a URL with another URL's key.** It reads the provider
+  and the key under `cfgMu`, so a writer that is half done cannot be seen. It then
+  releases the lock, and only then makes the client. Its key is used only if
+  `KeyBoundTo` holds for the URL it reads. The test
+  `TestReadersNeverPairKeyWithWrongURLDuringWrites` runs readers against a writer
+  that keeps switching between two servers, and each server checks which key it
+  received. Without the lock that test fails about 1 run in 5.
+
+`NewLLMService(cfg, keys, confirm)` takes the confirmer. Pass
+`NewNativeConfirmer(app.Dialog)` in `main.go`. Tests pass a fake.
 
 The LLM bound methods are checked by `bindings_test.go`: the exact method set,
 the read-only verb check (for this service only the mailbox-write verbs are
@@ -208,6 +234,13 @@ after the hook runs.
 - `bindings_test.go`: the bound method set, the read-only name check, the
   secret-field check on every bound return type, and which methods take the
   Wails context first.
+- `llm_hardening_test.go`: a new provider does not inherit an existing key; an
+  environment key not bound to the new URL is refused; the client refuses a
+  stale binding; the env-name collision; keyring errors fail closed (both reads);
+  the key is replaced before config is saved, and restored when the save fails;
+  the concurrency test above; the confirmation (confirmed, declined, dialog error,
+  no dialog, edit, disable, kind change, the transition table); no key in any
+  error.
 - `llm_test.go`: the DTO has no key and uses camelCase JSON; save validation
   writes nothing; create keeps the key out of `config.json`; an empty key keeps the
   stored one; a changed base URL needs a new key; keyring and config failures

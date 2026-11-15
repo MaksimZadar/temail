@@ -21,12 +21,15 @@ const llmKey = "sk-LLM-CANARY-9f2e"
 
 // fakeKeys is an in-memory LLMKeyStore.
 type fakeKeys struct {
-	mu     sync.Mutex
-	keys   map[string]string
-	setErr error
-	delErr error
-	getErr error
-	sets   int
+	mu        sync.Mutex
+	keys      map[string]string
+	setErr    error
+	delErr    error
+	getErr    error
+	storedErr error // returned by StoredLLMKey when set
+	sets      int
+	// onSet, if set, runs after a successful SetLLMKey (without the lock held).
+	onSet func(provider, key string)
 }
 
 func newFakeKeys() *fakeKeys { return &fakeKeys{keys: map[string]string{}} }
@@ -44,6 +47,18 @@ func (f *fakeKeys) GetLLMKey(p string) (string, error) {
 	return v, nil
 }
 
+// StoredLLMKey reads only the keyring entry. The fake has no environment layer,
+// so it is the same map as GetLLMKey.
+func (f *fakeKeys) StoredLLMKey(p string) (string, error) {
+	f.mu.Lock()
+	storedErr := f.storedErr
+	f.mu.Unlock()
+	if storedErr != nil {
+		return "", storedErr
+	}
+	return f.GetLLMKey(p)
+}
+
 func (f *fakeKeys) SetLLMKey(p, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -52,6 +67,9 @@ func (f *fakeKeys) SetLLMKey(p, key string) error {
 	}
 	f.sets++
 	f.keys[p] = key
+	if f.onSet != nil {
+		f.onSet(p, key)
+	}
 	return nil
 }
 
@@ -103,10 +121,38 @@ func okReply(w http.ResponseWriter) {
 	})
 }
 
+// fakeConfirm answers the cloud-enable question and counts the questions.
+type fakeConfirm struct {
+	mu     sync.Mutex
+	answer bool
+	err    error
+	asked  int
+}
+
+func (f *fakeConfirm) ConfirmCloudEnable(_ context.Context, _, _ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.asked++
+	return f.answer, f.err
+}
+
+func (f *fakeConfirm) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.asked
+}
+
+// bound returns p with a key binding for its current base URL, as a provider
+// looks after a key was approved for it.
+func bound(p config.LLMProvider) config.LLMProvider {
+	p.KeyBinding = config.BaseURLBinding(p.BaseURL)
+	return p
+}
+
 func newLLMSvc(t *testing.T, cfg config.Config, keys *fakeKeys) (*LLMService, *fakeConfig) {
 	t.Helper()
 	fc := newFakeConfig(cfg)
-	return NewLLMService(fc, keys), fc
+	return NewLLMService(fc, keys, &fakeConfirm{answer: true}), fc
 }
 
 // ---- reads and DTO shape ----
@@ -199,7 +245,9 @@ func TestSaveProviderCreatesWithKeyAndKeepsItOutOfConfig(t *testing.T) {
 func TestSaveProviderEmptyKeyKeepsStoredKey(t *testing.T) {
 	keys := newFakeKeys()
 	keys.keys["openrouter"] = llmKey
-	svc, fc := newLLMSvc(t, llmConfig(), keys)
+	cfg := llmConfig()
+	cfg.LLM.Providers[1] = bound(cfg.LLM.Providers[1]) // the key was approved for this URL
+	svc, fc := newLLMSvc(t, cfg, keys)
 	err := svc.SaveProvider(LLMProviderInput{Name: "openrouter", BaseURL: "https://openrouter.ai/api/v1", Model: "m3", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
@@ -247,15 +295,30 @@ func TestSaveProviderKeyringFailureRestoresConfig(t *testing.T) {
 	}
 }
 
-func TestSaveProviderConfigFailureLeavesKeyringAlone(t *testing.T) {
+// Fix 3: the keyring is written first, and put back if the config save fails.
+// A new key must not stay in the keyring for a provider that was never saved.
+func TestSaveProviderConfigFailureRollsBackKeyring(t *testing.T) {
+	keys := newFakeKeys()
+	keys.keys["lab"] = "previous-key"
+	svc, fc := newLLMSvc(t, llmConfig(), keys)
+	fc.saveE = errors.New("disk full")
+	if err := svc.SaveProvider(LLMProviderInput{Name: "lab", BaseURL: "http://127.0.0.1:8080/v1", APIKey: llmKey}); err == nil {
+		t.Fatal("want an error")
+	}
+	if keys.keys["lab"] != "previous-key" {
+		t.Fatalf("keyring = %q, want the previous key back", keys.keys["lab"])
+	}
+}
+
+func TestSaveProviderConfigFailureDeletesNewKey(t *testing.T) {
 	keys := newFakeKeys()
 	svc, fc := newLLMSvc(t, llmConfig(), keys)
 	fc.saveE = errors.New("disk full")
 	if err := svc.SaveProvider(LLMProviderInput{Name: "lab", BaseURL: "http://127.0.0.1:8080/v1", APIKey: llmKey}); err == nil {
 		t.Fatal("want an error")
 	}
-	if keys.setCount() != 0 {
-		t.Fatal("keyring written although the config write failed")
+	if _, ok := keys.keys["lab"]; ok {
+		t.Fatal("a new key was left in the keyring for a provider that was not saved")
 	}
 }
 
@@ -333,12 +396,14 @@ func TestTestProviderCategories(t *testing.T) {
 			c := llmConfig()
 			c.LLM.Providers[0].BaseURL = okSrv.URL + "/v1"
 			c.LLM.Providers[0].Capabilities.StructuredOutput = true
+			c.LLM.Providers[0] = bound(c.LLM.Providers[0]) // the key was approved for this URL
 			return c
 		}, func(k *fakeKeys) { k.keys["ollama"] = llmKey }, "ollama", string(llm.CategoryOK), true},
 		{"unauthorized", func() config.Config {
 			c := llmConfig()
 			c.LLM.Providers[0].BaseURL = authSrv.URL + "/v1"
 			c.LLM.Providers[0].Capabilities.StructuredOutput = true
+			c.LLM.Providers[0] = bound(c.LLM.Providers[0]) // the key was approved for this URL
 			return c
 		}, func(k *fakeKeys) { k.keys["ollama"] = llmKey }, "ollama", string(llm.CategoryUnauthorized), false},
 		{"cloud disabled sends nothing", llmConfig, func(*fakeKeys) {}, "openrouter", CategoryCloudDisabled, false},

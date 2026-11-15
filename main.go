@@ -54,7 +54,7 @@ func main() {
 	app.RegisterService(application.NewService(syncSvc))
 	app.RegisterService(application.NewService(mailSvc))
 	app.RegisterService(application.NewService(setupSvc))
-	app.RegisterService(application.NewService(services.NewLLMService(cfg, keyring)))
+	app.RegisterService(application.NewService(services.NewLLMService(cfg, keyring, services.NewNativeConfirmer(app.Dialog))))
 
 	// The ordered teardown (sync, mail reads, then the cache) runs in this hook,
 	// before the services' own shutdown hooks. It leaves the cache open if a
