@@ -21,6 +21,7 @@ const box = (name: string, kind: MailboxDTO["kind"]): MailboxDTO => ({
   uidValidity: 1,
   messages: 0,
   bodies: 0,
+  unseen: 0,
   lastSync: null,
 });
 describe("orderFolders", () => {

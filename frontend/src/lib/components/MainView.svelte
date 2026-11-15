@@ -94,6 +94,7 @@
       const at = Date.now() + ms;
       if (timer !== undefined && due <= at) return;
       clearTimeout(timer);
+      mail.stopLive();
       due = at;
       timer = setTimeout(() => {
         timer = undefined;
@@ -103,6 +104,11 @@
     const offs = [
       api.onEvent("sync:progress", () => schedule(2000)),
       api.onEvent("sync:done", () => schedule(300)),
+      // Live changes: coalesced in the store, which updates the counts and the
+      // open list without moving the cursor.
+      api.onEvent<{ mailboxes: string[] }>("sync:changed", (e) =>
+        mail.noteChanged(e?.mailboxes),
+      ),
       ui.register("list.down", (c) => move(1, c)),
       ui.register("list.up", (c) => move(-1, c)),
       ui.register("list.first", (c) => jump("first", c)),

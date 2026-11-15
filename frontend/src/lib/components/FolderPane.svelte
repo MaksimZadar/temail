@@ -50,13 +50,24 @@
               class:current={f.name === mail.current}
               class:cursor={focused && f.name === mail.folderCursor}
               aria-current={f.name === mail.current ? "true" : undefined}
-              aria-label="{f.displayName}, {f.messages} messages"
+              class:unread={f.unseen > 0 && f.kind !== "drafts"}
+              title="{f.unseen.toLocaleString()} unread · {f.messages.toLocaleString()} messages"
+              aria-label="{f.displayName}{f.unseen > 0
+                ? `, ${f.unseen} unread`
+                : ''}, {f.messages} messages"
               onclick={() => pick(f)}
             >
               <span class="name">{f.displayName}</span>
-              {#if f.messages > 0}<span class="count"
-                  >{f.messages.toLocaleString()}</span
-                >{/if}
+              {#if f.kind === "drafts"}
+                <!-- Drafts shows how many there are, not how many are unread. -->
+                {#if f.messages > 0}<span class="count"
+                    >{f.messages.toLocaleString()}</span
+                  >{/if}
+              {:else if f.unseen > 0}
+                <span class="badge" aria-hidden="true"
+                  >{f.unseen > 9999 ? "9999+" : f.unseen.toLocaleString()}</span
+                >
+              {/if}
             </button>
           </li>
         {/each}
@@ -126,6 +137,21 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .unread .name {
+    font-weight: 600;
+  }
+  .badge {
+    min-width: 1.4rem;
+    padding: 0 0.4rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: var(--fs-small);
+    font-weight: 600;
+    text-align: center;
+    line-height: 1.25rem;
+    font-variant-numeric: tabular-nums;
   }
   .count {
     color: var(--fg-dim);

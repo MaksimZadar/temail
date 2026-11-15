@@ -52,6 +52,7 @@ const folders = (n: number) =>
     uidValidity: 7,
     messages: 1,
     bodies: 0,
+    unseen: 0,
     lastSync: null,
   }));
 

@@ -15,6 +15,16 @@
   const win = $derived(windowFor(scrollTop, viewport, ROW, mail.shown.length));
   const rows = $derived(mail.shown.slice(win.start, win.end));
   const focused = $derived(layout.focus === "list");
+  // Compact label chips only when the list is wide enough to stay dense.
+  const showLabels = $derived(
+    (layout.narrow ? layout.width : layout.listW) >= 520,
+  );
+  const labelsOf = (m: {
+    mailboxes?: { name: string; displayName: string; kind: string }[] | null;
+  }) =>
+    (m.mailboxes ?? []).filter(
+      (r) => r.kind === "label" && r.name !== mail.current,
+    );
   const activeId = $derived(
     mail.cursorKey !== null && mail.cursorIndex >= 0
       ? `msg-${mail.cursorIndex}`
@@ -118,6 +128,7 @@
             id="msg-{i}"
             class="row"
             class:unread
+            class:withLabels={showLabels}
             class:cursor={i === mail.cursorIndex}
             class:open={keyOf(m) === mail.openKey}
             role="option"
@@ -134,6 +145,18 @@
             <span class="dot" aria-hidden="true"></span>
             <span class="from">{senderName(m.from)}</span>
             <span class="subject">{m.subject || "(no subject)"}</span>
+            {#if showLabels}
+              {@const ls = labelsOf(m)}
+              <span class="labels" aria-hidden="true">
+                {#each ls.slice(0, 2) as l (l.name)}
+                  <span class="lab" title={l.displayName}
+                    ><i></i>{l.displayName}</span
+                  >
+                {/each}
+                {#if ls.length > 2}<span class="lab more">+{ls.length - 2}</span
+                  >{/if}
+              </span>
+            {/if}
             <span class="date">{formatListDate(m.date)}</span>
           </div>
         {/each}
@@ -220,6 +243,9 @@
     cursor: default;
     position: relative;
   }
+  .row.withLabels {
+    grid-template-columns: 0.5rem minmax(6rem, 11rem) 1fr auto auto;
+  }
   .row > span {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -257,6 +283,34 @@
   }
   .pane:not(.focused) .cursor::before {
     background: var(--fg-dim);
+  }
+  .labels {
+    display: inline-flex;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+  .lab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    max-width: 6.5rem;
+    padding: 0 0.4rem;
+    height: 1.05rem;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--fg);
+    font-size: 0.6875rem;
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lab i {
+    flex: none;
+    width: 0.3rem;
+    height: 0.3rem;
+    border-radius: 50%;
+    background: var(--accent);
   }
   .date {
     font-size: var(--fs-small);

@@ -101,7 +101,13 @@ export function relativeTime(from: number, now: number): string {
 
 class Sync {
   // Published (reactive) state. Updated at most every FLUSH_MS.
+  /** The initial sync is in progress. Not the same as "live": see `watching`. */
   running = $state(false);
+  /** The change watcher is up (after the initial sync). */
+  watching = $state(false);
+  /** The live (IDLE) connection is up. False while the watcher polls. */
+  idle = $state(false);
+  lastChecked = $state<number | null>(null);
   phase = $state<Phase>("idle");
   rows = $state<FolderRow[]>([]);
   error = $state("");
@@ -145,7 +151,12 @@ class Sync {
   get text(): string {
     if (this.error) return "Sync failed";
     if (this.running) {
-      if (this.phase === "connecting" || this.total === 0) return "Syncing…";
+      if (
+        this.phase === "connecting" ||
+        this.phase === "idle" ||
+        this.total === 0
+      )
+        return "Syncing…";
       if (this.phase === "bodies")
         return `Downloading messages · ${this.doneCount} of ${this.total} folders`;
       const n = this.rows.filter(
@@ -153,9 +164,31 @@ class Sync {
       ).length;
       return `Syncing folders · ${n} of ${this.total}`;
     }
+    if (this.watching) {
+      if (this.idle) return "Live";
+      return this.lastChecked !== null
+        ? `Up to date · checked ${relativeTime(this.lastChecked, this.now)}`
+        : "Up to date";
+    }
     if (this.finishedAt !== null)
       return `Synced · ${relativeTime(this.finishedAt, this.now)}`;
     return this.hasResult ? "Synced" : "Waiting to sync";
+  }
+
+  /** The watcher works by polling because the live connection is down. */
+  get polling(): boolean {
+    return this.watching && !this.idle && !this.error;
+  }
+  /** Tooltip for the status line while watching. */
+  get detail(): string {
+    if (!this.watching) return "Show sync details";
+    const when =
+      this.lastChecked !== null
+        ? ` Last checked ${relativeTime(this.lastChecked, this.now)}.`
+        : "";
+    return this.idle
+      ? `Watching for new mail.${when}`
+      : `The live connection is down, so temail checks every so often.${when}`;
   }
 
   private isHeadersFinished(r: FolderRow): boolean {
@@ -201,6 +234,9 @@ class Sync {
 
   /** Handle one progress event. Cheap; publishing is coalesced. */
   onProgress(p: api.ProgressEvent): void {
+    // While watching, resyncs after a change are not an "initial sync". They
+    // must not flip the footer back to Syncing.
+    if (this.watching) return;
     if (this.finished) {
       // A new run after a finished one.
       this.resetRun();
@@ -258,10 +294,36 @@ class Sync {
     this.seeded = false;
     void this.seed().then(() => this.flush());
     this.flush();
+    // The watcher starts right after the initial sync: pick up its state.
+    void this.refreshStatus();
+  }
+
+  /** Read watching/idle/lastChecked. `running` is the initial sync only. */
+  async refreshStatus(): Promise<void> {
+    try {
+      const s = await api.syncStatus();
+      this.now = Date.now();
+      this.watching = !!s.watching;
+      this.idle = !!s.idle;
+      const t = s.lastChecked ? Date.parse(s.lastChecked) : NaN;
+      this.lastChecked = Number.isNaN(t) ? null : t;
+      if (s.watching) {
+        // The initial sync is over. Never leave the spinner on.
+        this.running = false;
+        this.phase = "idle";
+        this.finished = true;
+        this.hasResult = true;
+        if (s.lastResult || this.rows.length > 0) this.flush();
+      }
+    } catch {
+      /* the status is optional; the next event tries again */
+    }
   }
 
   onError(message: string): void {
     this.running = false;
+    this.watching = false;
+    this.idle = false;
     this.phase = "idle";
     this.error = message || "Sync failed.";
     this.announcement = "Sync failed";
@@ -312,11 +374,29 @@ class Sync {
       api.onEvent<{ message: string }>("sync:error", (e) =>
         this.onError(e.message),
       ),
+      // A check found changes, so lastChecked and idle may have moved.
+      api.onEvent<{ mailboxes: string[] }>(
+        "sync:changed",
+        () => void this.refreshStatus(),
+      ),
     ];
-    this.tick = setInterval(() => (this.now = Date.now()), 30_000);
+    this.tick = setInterval(() => {
+      this.now = Date.now();
+      if (this.watching) void this.refreshStatus();
+    }, 30_000);
     try {
       const s = await api.syncStatus();
-      if (s.running) this.running = true;
+      this.now = Date.now();
+      this.running = !!s.running;
+      this.watching = !!s.watching;
+      this.idle = !!s.idle;
+      const t = s.lastChecked ? Date.parse(s.lastChecked) : NaN;
+      this.lastChecked = Number.isNaN(t) ? null : t;
+      if (s.watching) {
+        this.running = false;
+        this.hasResult = true;
+        this.finished = true;
+      }
       if (s.lastResult && !this.hasResult) this.hasResult = true;
       if (s.lastError && !this.hasResult) this.error = s.lastError;
     } catch {
@@ -342,6 +422,9 @@ class Sync {
     this.finished = false;
     this.seeded = false;
     this.running = false;
+    this.watching = false;
+    this.idle = false;
+    this.lastChecked = null;
     this.phase = "idle";
     this.rows = [];
     this.error = "";
