@@ -12,8 +12,10 @@
 package llm
 
 import (
+	"context"
 	"errors"
-	"net/url"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -55,9 +57,14 @@ const (
 	CategoryOther                 Category = "other"
 )
 
-// Error is a failed call. Its message is fixed text for the category, so it
-// never contains a key, a prompt or a response. Unwrap gives the cause for
-// errors.Is and errors.As. Do not print the cause to users or logs.
+// Error is a failed call. Its text is fixed per category, so it never contains a
+// key, a prompt or a response. Format and GoString print the same text for every
+// verb, so %+v and %#v do not expand fields.
+//
+// The SDK error is not kept. It carries the request (headers included, so the
+// bearer key) and the response body. Unwrap returns only the context sentinels
+// (context.Canceled, context.DeadlineExceeded) or ErrInvalidOutput, so
+// errors.Is works for those and nothing else leaks.
 type Error struct {
 	Category Category
 	// Status is the HTTP status when the server answered, else 0.
@@ -69,7 +76,18 @@ func (e *Error) Error() string {
 	return "llm " + string(e.Category) + ": " + categoryText(e.Category)
 }
 
-// Unwrap returns the underlying cause.
+// Format writes the fixed text for every verb.
+func (e *Error) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, e.Error())
+}
+
+// GoString is the fixed text, so %#v cannot show the cause.
+func (e *Error) GoString() string {
+	return fmt.Sprintf("llm.Error{Category: %q, Status: %d}", string(e.Category), e.Status)
+}
+
+// Unwrap returns the sentinel cause, if any. It never returns an SDK or
+// transport error.
 func (e *Error) Unwrap() error { return e.cause }
 
 func categoryText(c Category) string {
@@ -144,8 +162,20 @@ func normalizeBase(raw string) string {
 	return raw
 }
 
-// validBase reports whether raw is an http(s) URL with a host.
+// validBase applies the same rules as config.ValidBaseURL: http(s), a host, and
+// no userinfo, query or fragment.
 func validBase(raw string) bool {
-	u, err := url.Parse(raw)
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+	return config.ValidBaseURL(raw) == nil
+}
+
+// keepCause returns the only causes that may leave this package with an *Error.
+func keepCause(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
 }

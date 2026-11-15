@@ -18,9 +18,13 @@ provider, and the SDK's own retries are off (see below).
   always passes the key option, even when it is empty. So an `OPENAI_API_KEY` in
   the environment is not sent to a configured host, and a local endpoint gets no
   `Authorization` header at all.
-- **Errors.** `*Error` has a fixed message per category. Its `Unwrap` returns the
-  SDK error for `errors.Is`/`errors.As`. Do not print or log the wrapped cause:
-  transport errors carry URLs, and API errors can echo server text.
+- **Errors carry no request.** `*Error` holds a category and an HTTP status. It
+  does not keep the SDK error, because that error holds the request (the bearer
+  key in the headers) and the response body. `Unwrap` returns only
+  `context.Canceled`, `context.DeadlineExceeded` or `ErrInvalidOutput`. `Format`
+  and `GoString` print the same fixed text for every verb, so `%+v` and `%#v`
+  cannot expand fields. The tests walk the whole chain under all these verbs and
+  check for the key, the body and the SDK type.
 - **No logging.** The package has no logger. Prompts, replies and keys are never
   written anywhere.
 - **Plain text out.** Model output is data. Nothing here renders it or fetches a
@@ -38,6 +42,24 @@ provider, and the SDK's own retries are off (see below).
 
 Prompt mode and any mode whose reply is empty go through the same validation.
 
+## HTTP transport
+
+Built by `newHTTPClient`:
+
+- **No redirects.** `CheckRedirect` returns `http.ErrUseLastResponse`, and the
+  transport refuses any 3xx reply (`errRedirectRefused`, category `other`). So the
+  bearer key is never sent to a redirect target.
+- **Body limits.** Replies are capped at 1 MiB and `/models` at 2 MiB. A longer
+  body fails with `errBodyTooLarge` (category `other`), and no partial body is
+  returned. The limit applies both when `Content-Length` says so and while the
+  body is read.
+- **Loopback only for `local`.** `loopbackOnlyDial` resolves the host. If any
+  address is not loopback, it refuses. It then dials a loopback IP, not the name,
+  so DNS cannot change the address between check and connect. A local provider
+  uses no proxy. A `cloud` provider uses the default transport.
+- **Base URLs** must be http(s) with a host and no userinfo, query or fragment
+  (`config.ValidBaseURL`, the same check that config uses).
+
 ## Validation and retry
 
 `Complete[T](ctx, client, Request, Schema[T])` returns the value that
@@ -46,6 +68,15 @@ Prompt mode and any mode whose reply is empty go through the same validation.
 
 - A failed decode gets **one** retry. The retry adds the decoder's error text to
   the prompt, so the decoder must not echo its input.
+- **Custom `Decode` callbacks must not echo attacker-controlled text.** The
+  correction message carries the decoder's error. A decoder that puts the reply,
+  or any email text, into its error sends that text back to the model, and
+  possibly into a second prompt. `DecodeStrict` keeps only the category of the
+  JSON error. Anything written by hand must do the same. The error text is cut to
+  300 characters before it goes into the prompt.
+- **The correction counts against the context limit.** `maxContext` is checked
+  again with the correction message included. A retry that would go over it is
+  refused with `ErrTooLarge` and is not sent.
 - A second failure returns the zero value and `*Error` with category
   `invalid_output`. There is no partial result.
 - Transport and API errors are not retried by this package.
@@ -84,6 +115,11 @@ an empty list and `ErrModelListUnsupported`. The caller then asks for the model
 name.
 
 ## Tests
+
+`hardening_test.go` covers the errors carrying no request (every verb, the whole
+chain), the bearer key still being sent, the base-URL rules, redirects not
+followed, oversized replies failing closed (chat and models), the loopback dialer,
+the correction counted against the limit, and the correction text being cut.
 
 `llm_test.go` runs against an `httptest` OpenAI-compatible fake. It covers: each
 structured mode (request shape, and the decoded value); retry then success; retry

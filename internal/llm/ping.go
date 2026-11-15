@@ -37,6 +37,11 @@ func classify(err error) (Category, int) {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return CategoryTimeout, 0
 	}
+	// Our own refusals (an oversized body, a non-loopback local address) are
+	// "other", not "unreachable": the server was reached or never dialled.
+	if errors.Is(err, errBodyTooLarge) || errors.Is(err, errNotLoopback) || errors.Is(err, errRedirectRefused) {
+		return CategoryOther, 0
+	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		return CategoryUnreachable, 0
@@ -84,10 +89,10 @@ func (c *Client) Ping(ctx context.Context) error {
 	}
 	// The server answered, but not in the format the mode needs.
 	if e.Category == CategoryInvalidOutput {
-		return &Error{Category: CategoryStructuredUnsupported, cause: err}
+		return &Error{Category: CategoryStructuredUnsupported, cause: ErrInvalidOutput}
 	}
 	if (e.Status == 400 || e.Status == 422) && c.mode() != modePrompt {
-		return &Error{Category: CategoryStructuredUnsupported, Status: e.Status, cause: err}
+		return &Error{Category: CategoryStructuredUnsupported, Status: e.Status}
 	}
 	return err
 }
