@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -36,6 +37,14 @@ const (
 	DefaultRetries       = 3
 	DefaultBackoff       = time.Second
 )
+
+// RetryCount returns a pointer for Options.Retries. Zero means no retries.
+func RetryCount(n int) *int { return &n }
+
+// ErrPartial is returned by Run when the run finished but some mailboxes
+// failed. The failures are in Result.MailboxErrors, and the rest of the run
+// (other mailboxes and bodies) completed.
+var ErrPartial = errors.New("sync finished with mailbox errors")
 
 // State names the phase of a run, as reported in Progress.
 type State string
@@ -78,9 +87,10 @@ type Options struct {
 	BodyBatchSize int
 	// BodyDelay is waited between body fetches, so Bridge is not hammered.
 	BodyDelay time.Duration
-	// Retries is how many times a failed operation is retried after
-	// reconnecting.
-	Retries int
+	// Retries is how many times an operation that failed with a transport
+	// error is retried after reconnecting. nil means DefaultRetries; use
+	// RetryCount(0) to disable retries.
+	Retries *int
 	// Backoff is the delay before the first retry. It doubles, up to 30 s.
 	Backoff time.Duration
 	// OnProgress, if set, receives progress events.
@@ -93,7 +103,18 @@ type Result struct {
 	HeadersFetched int
 	Deleted        int
 	BodiesFetched  int
-	BodiesFailed   int
+	// BodiesFailed counts body fetches that failed for any reason, including
+	// transient ones that are not counted toward the attempt bound.
+	BodiesFailed int
+	// MailboxErrors lists mailboxes whose sync failed for a reason other than
+	// a lost connection or cancellation. The run continued past them.
+	MailboxErrors []MailboxError
+}
+
+// MailboxError is one mailbox that failed during a run.
+type MailboxError struct {
+	Mailbox string
+	Err     error
 }
 
 // Syncer runs syncs for one account. Create it with New.
@@ -122,11 +143,8 @@ func New(st store.Store, client mail.Client, connect ConnectFunc, opts Options) 
 	if opts.BodyDelay == 0 {
 		opts.BodyDelay = DefaultBodyDelay
 	}
-	if opts.Retries < 0 {
+	if opts.Retries != nil && *opts.Retries < 0 {
 		return nil, errors.New("sync: retries must not be negative")
-	}
-	if opts.Retries == 0 {
-		opts.Retries = DefaultRetries
 	}
 	if opts.Backoff <= 0 {
 		opts.Backoff = DefaultBackoff
@@ -153,6 +171,11 @@ func (s *Syncer) Run(ctx context.Context) (Result, error) {
 	}); err != nil {
 		return res, err
 	}
+	if len(boxes) == 0 {
+		// An empty listing is treated as a failed listing: nothing is cached or
+		// removed, and the run ends here.
+		return res, errors.New("server listed no mailboxes; nothing was changed")
+	}
 	boxes = orderMailboxes(boxes)
 	if err := s.store.UpsertMailboxes(ctx, s.opts.Account, boxes); err != nil {
 		return res, fmt.Errorf("cache mailboxes: %w", err)
@@ -168,14 +191,27 @@ func (s *Syncer) Run(ctx context.Context) (Result, error) {
 
 	for _, b := range boxes {
 		if err := s.syncMailbox(ctx, b, &res); err != nil {
-			return res, err
+			if fatal(ctx, err) {
+				return res, err
+			}
+			res.MailboxErrors = append(res.MailboxErrors, MailboxError{Mailbox: b.Name, Err: err})
 		}
 	}
 	if err := s.syncBodies(ctx, &res); err != nil {
 		return res, err
 	}
 	s.emit(Progress{Account: s.opts.Account, State: StateDone})
+	if len(res.MailboxErrors) > 0 {
+		return res, ErrPartial
+	}
 	return res, nil
+}
+
+// fatal reports errors that end the whole run: a cancelled context or a lost
+// connection. Other mailbox errors are recorded and the run continues.
+func fatal(ctx context.Context, err error) bool {
+	var ce *connError
+	return ctx.Err() != nil || errors.As(err, &ce) || isTransport(err)
 }
 
 // syncMailbox runs steps 2 and 3 for one mailbox.
@@ -188,6 +224,11 @@ func (s *Syncer) syncMailbox(ctx context.Context, box model.Mailbox, res *Result
 		return err
 	}
 	epoch := listing.UIDValidity
+	if epoch == 0 {
+		// UIDVALIDITY 0 is not a real epoch. Caching under it would mix UIDs
+		// from different epochs, so the mailbox is skipped instead.
+		return fmt.Errorf("server reported UIDVALIDITY 0 for %s; not caching it", box.Name)
+	}
 	if epoch != box.UIDValidity {
 		// The epoch changed after ListMailboxes. The store purges on upsert.
 		box.UIDValidity = epoch
@@ -237,9 +278,18 @@ func (s *Syncer) syncMailbox(ctx context.Context, box model.Mailbox, res *Result
 		return fmt.Errorf("remove deleted messages of %s: %w", box.Name, err)
 	}
 	res.Deleted += deleted
-	updates := make([]store.FlagUpdate, 0, len(listing.Messages))
+	cachedFlags, err := s.store.CachedFlags(ctx, s.opts.Account, box.Name, epoch)
+	if err != nil {
+		return fmt.Errorf("read cached flags of %s: %w", box.Name, err)
+	}
+	// Write only the rows whose flags changed on the server.
+	var updates []store.FlagUpdate
 	for _, m := range listing.Messages {
-		updates = append(updates, store.FlagUpdate{UID: m.UID, Flags: m.Flags})
+		want := store.NormalizeFlags(m.Flags)
+		if have, ok := cachedFlags[m.UID]; ok && slices.Equal(have, want) {
+			continue
+		}
+		updates = append(updates, store.FlagUpdate{UID: m.UID, Flags: want})
 	}
 	if err := s.store.UpdateFlags(ctx, s.opts.Account, box.Name, epoch, updates); err != nil {
 		return fmt.Errorf("update flags of %s: %w", box.Name, err)

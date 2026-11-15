@@ -34,14 +34,36 @@ read-only `internal/mail` client and has no UI, Wails or LLM knowledge.
      transaction before the next is fetched. The UI can show the newest mail
      after the first window.
 3. **Reconcile, per mailbox.** Cached UIDs that are not in the listing are
-   deleted (`DeleteMissing`). Flags from the listing are written
-   (`UpdateFlags`). Only then is `last_sync` set. A mailbox that was
-   interrupted before this point keeps its old `last_sync`.
-4. **Bodies, account-wide.** `PendingBodies` gives up to `BodyBatchSize` (10)
-   messages with no body, newest first. Each one is fetched with
+   deleted (`DeleteMissing`, in transactions of at most 1000 rows). The
+   cached flags are read (`CachedFlags`), and only rows whose flags differ
+   from the listing are written (`UpdateFlags`). Only then is `last_sync`
+   set. A mailbox that was interrupted before this point keeps its old
+   `last_sync`. The listing costs one `UID FETCH 1:* (UID FLAGS)` per mailbox.
+4. **Bodies, account-wide.** `PendingBodies` pages through the messages with
+   no body, newest first, `BodyBatchSize` (10) at a time. The page cursor is
+   the last message of the previous page. Each message is fetched with
    `FetchMessage` and stored with `SetBody`. There is a `BodyDelay` (default
-   500 ms) before every fetch except the first. The loop ends when
-   `PendingBodies` returns nothing.
+   500 ms) before every fetch except the first. The loop ends when a page is
+   empty.
+
+### Mailbox failures
+
+A mailbox that fails for a reason other than a lost connection or a cancelled
+context (a server NO or BAD, a UIDVALIDITY of 0, a parse error) is recorded
+in `Result.MailboxErrors`. The run continues with the other mailboxes and
+with the body phase. `Run` then returns `ErrPartial`. The caller should show
+the errors and run again.
+
+A lost connection that cannot be restored, or a cancelled context, ends the
+run at once. Those are not per-mailbox problems.
+
+### Empty and zero listings
+
+- An empty mailbox listing from the server is an error. Nothing is cached or
+  removed.
+- A UIDVALIDITY of 0 is not an epoch. The mailbox is recorded as a mailbox
+  error and nothing is cached under 0. The store also treats 0 as unknown and
+  never purges because of it.
 
 ## Resume semantics
 
@@ -56,9 +78,14 @@ Progress is kept in the cache. There is no separate checkpoint. The rule is:
 - Mail that arrived during the interruption is picked up in the same way. It
   has the highest UIDs, so it is in the first window.
 - Bodies follow the same rule. A message with a body is never offered again.
-  A message whose body fetch failed is retried on later runs, up to
-  `store.MaxBodyAttempts` (3) failures. After that it is left alone until the
-  mailbox is purged.
+  A message whose body fetch failed is offered again on later runs, but only
+  its deterministic failures count toward `store.MaxBodyAttempts` (3). A
+  deterministic failure is "message not found" or "could not be parsed". After
+  the bound the message is left alone until its mailbox is purged. Other
+  failures (a server NO during Bridge startup, unknown errors) are not
+  counted, so they cannot permanently blank a body.
+- Within one run, a failed body is not offered again: paging uses the cursor,
+  so each message is attempted at most once per run.
 
 Tests cover this. An interrupted header run resumes with each UID fetched once
 across both runs. An interrupted body run does the same. Both use an exact
@@ -76,18 +103,23 @@ extra logic, and it costs one `ListUIDs` and one local read per mailbox. The
 
 ## Retries and reconnects
 
-- A failed operation waits `Backoff` (default 1 s, doubled each attempt, cap
-  30 s), reconnects, and runs again. This happens up to `Retries` (default 3)
-  times. Connect is the only way to recover a connection, and it replaces any
-  half-open one.
+- Only transport errors are retried: network and IO errors, a closed
+  connection, or no connection (`isTransport`). A failed operation waits
+  `Backoff` (default 1 s, doubled each attempt, cap 30 s), reconnects, and
+  runs again. This happens up to `Retries` times.
+- Everything else returns at once, with no reconnect. That covers server NO
+  and BAD replies, parse errors and "not found".
+- `Retries` is a `*int`. `nil` means the default (3). `RetryCount(0)` means no
+  retries. The zero value is not "use the default".
+- Retries never apply to permanent errors: `ErrUntrustedCert`,
+  `ErrCertMismatch`, `ErrNotLoopback` and `ErrAuthFailed` (a rejected Bridge
+  password). Those need user action, so retrying every run is pointless.
 - A connection that cannot be restored ends the run with an error. The cache
   keeps what it has, and the next run resumes.
-- `ErrUntrustedCert`, `ErrCertMismatch` and `ErrNotLoopback` are not retried.
-  They need user action.
 - In the body step, a message that fails while the connection is up is
-  counted in `BodiesFailed` and skipped for this run. It is retried later,
-  up to the attempt bound. A dead Bridge is never mistaken for a bad message,
-  because a reconnect that fails aborts the run.
+  counted in `BodiesFailed` and skipped for this run. Only deterministic
+  failures are counted toward the attempt bound. A dead Bridge is never
+  mistaken for a bad message, because a failed reconnect aborts the run.
 
 ## Progress
 
@@ -99,6 +131,15 @@ extra logic, and it costs one `ListUIDs` and one local read per mailbox. The
 | `connecting`, `mailboxes`, `reconciling`, `done` | Account-level steps (`reconciling` is also emitted per mailbox) | |
 | `headers` | Header windows for one mailbox | `HeadersDone` / `HeadersTotal` (this run's pending UIDs) |
 | `bodies` | Bodies for one mailbox | `BodiesDone` (cached bodies) / `BodiesTotal` (cached messages) |
+
+## Future work
+
+- **Body dedupe by Message-ID.** In Proton, a message in "All Mail" and in
+  each label or folder that holds it appears as a separate UID. Each copy
+  currently gets its own body fetch. Fetching one body per Message-ID would
+  save bandwidth and Bridge load. It needs a policy for per-copy state (flags
+  and mailbox membership stay per copy; only the body is shared). It is not
+  implemented.
 
 ## Tests
 
@@ -115,9 +156,15 @@ fail Connect, and reject individual bodies. The tests cover:
 - new mail on a later run, fetched without refetching the cache;
 - interrupt and resume for headers and bodies, with exact fetch counts;
 - body throttling: a delay between fetches, none before the first, batches of `BodyBatchSize`;
-- a bad body is bounded and does not abort the run;
+- a deterministic bad body is attempted once per run and dropped after the bound;
+  a bad body does not block later ones in small batches;
+- a transient body error is not counted;
+- a server NO on a mailbox is not retried or reconnected, and the run continues
+  past it (`ErrPartial`); the body phase still runs;
 - a transient connection drop reconnects; a persistent one aborts without corrupting the cache;
-- an untrusted certificate is not retried;
+- an untrusted certificate and a rejected password are not retried; `RetryCount(0)` disables retries;
+- an empty listing removes nothing; UIDVALIDITY 0 is not cached;
+- reconcile writes only changed flags and lists each mailbox once;
 - cancellation during the body step.
 
 Run with `go test -race ./internal/sync/`.

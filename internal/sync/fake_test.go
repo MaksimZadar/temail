@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	gosync "sync"
 	"time"
 
@@ -40,12 +41,24 @@ type fakeBridge struct {
 	connects     int
 	connectFails []error // consumed by Connect, one per call
 	opFails      []error // consumed by operations; each one drops the connection
-	badBodies    map[string]bool
+
+	// mailboxErr makes FetchHeaders and ListUIDs fail for a mailbox, without
+	// dropping the connection (like a server NO reply).
+	mailboxErr map[string]error
+	// bodyErr makes FetchMessage fail for "mailbox:uid", without dropping the
+	// connection.
+	bodyErr map[string]error
+	// emptyListing makes ListMailboxes return nothing.
+	emptyListing bool
+	// zeroValidity makes ListUIDs report UIDVALIDITY 0 for a mailbox.
+	zeroValidity  map[string]bool
+	listUIDsCalls int
 
 	headerRanges []mail.UIDRange
 	headerFetch  map[string]int // "mailbox:uid" -> times fetched
 	bodyOrder    []string       // "mailbox:uid" in fetch order
 	bodyFetch    map[string]int
+	bodyAttempts map[string]int
 
 	// Hooks run after the connection check, outside the lock.
 	onHeaders func(rng mail.UIDRange)
@@ -54,10 +67,13 @@ type fakeBridge struct {
 
 func newFakeBridge() *fakeBridge {
 	b := &fakeBridge{
-		boxes:       map[string]*fakeBox{},
-		headerFetch: map[string]int{},
-		bodyFetch:   map[string]int{},
-		badBodies:   map[string]bool{},
+		boxes:        map[string]*fakeBox{},
+		headerFetch:  map[string]int{},
+		bodyFetch:    map[string]int{},
+		bodyAttempts: map[string]int{},
+		bodyErr:      map[string]error{},
+		mailboxErr:   map[string]error{},
+		zeroValidity: map[string]bool{},
 	}
 	b.addBox("INBOX", model.KindInbox, 1)
 	return b
@@ -149,6 +165,9 @@ func (b *fakeBridge) ListMailboxes(ctx context.Context) ([]model.Mailbox, error)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var out []model.Mailbox
+	if b.emptyListing {
+		return out, nil
+	}
 	for name, box := range b.boxes {
 		out = append(out, model.Mailbox{
 			Name: name, DisplayName: name, Kind: box.kind, UIDValidity: box.validity,
@@ -174,6 +193,9 @@ func (b *fakeBridge) FetchHeaders(ctx context.Context, mailbox string, rng mail.
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if err := b.mailboxErr[mailbox]; err != nil {
+		return nil, err
+	}
 	b.headerRanges = append(b.headerRanges, rng)
 	box := b.boxes[mailbox]
 	var out []model.MessageHeader
@@ -200,8 +222,15 @@ func (b *fakeBridge) ListUIDs(ctx context.Context, mailbox string) (mail.UIDList
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.listUIDsCalls++
+	if err := b.mailboxErr[mailbox]; err != nil {
+		return mail.UIDListing{}, err
+	}
 	box := b.boxes[mailbox]
 	out := mail.UIDListing{UIDValidity: box.validity}
+	if b.zeroValidity[mailbox] {
+		out.UIDValidity = 0
+	}
 	for uid := uint32(1); uid < box.next; uid++ {
 		if m, ok := box.msgs[uid]; ok {
 			out.Messages = append(out.Messages, mail.UIDState{UID: uid, Flags: append([]string(nil), m.flags...)})
@@ -225,8 +254,12 @@ func (b *fakeBridge) FetchMessage(ctx context.Context, mailbox string, uid uint3
 	key := fmt.Sprintf("%s:%d", mailbox, uid)
 	box := b.boxes[mailbox]
 	m, ok := box.msgs[uid]
-	if !ok || b.badBodies[key] {
-		return model.Message{}, fmt.Errorf("message UID %d not found in %s", uid, mailbox)
+	b.bodyAttempts[key]++
+	if err := b.bodyErr[key]; err != nil {
+		return model.Message{}, err
+	}
+	if !ok {
+		return model.Message{}, fmt.Errorf("%w: UID %d in %s", mail.ErrMessageNotFound, uid, mailbox)
 	}
 	b.bodyFetch[key]++
 	b.bodyOrder = append(b.bodyOrder, key)
@@ -251,7 +284,18 @@ func (b *fakeBridge) Close() error {
 	return nil
 }
 
-// fetchCount returns how many times a message's header was fetched.
+// transportErr is a connection-level failure (a refused dial).
+func transportErr() error {
+	return &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+}
+
+// bodyFetchAttempts counts FetchMessage calls for "mailbox:uid", successful or not.
+func (b *fakeBridge) bodyFetchAttempts(key string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.bodyAttempts[key]
+}
+
 func (b *fakeBridge) headerFetches(mailbox string, uid uint32) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -102,13 +102,22 @@ func run(ctx context.Context, accountID string, trust bool, cachePath string, bo
 		return err
 	}
 
-	res, err := syn.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("sync: %w", err)
-	}
+	res, runErr := syn.Run(ctx)
 	fmt.Printf("\nDone: %d mailboxes, %d headers fetched, %d deleted on server, %d bodies fetched, %d body failures.\n",
 		res.Mailboxes, res.HeadersFetched, res.Deleted, res.BodiesFetched, res.BodiesFailed)
-	return printCounts(ctx, st, acct.ID)
+	for _, me := range res.MailboxErrors {
+		fmt.Fprintf(os.Stderr, "mailsync: mailbox %s failed: %v\n", me.Mailbox, me.Err)
+	}
+	if runErr != nil && !errors.Is(runErr, mailsync.ErrPartial) {
+		return fmt.Errorf("sync: %w", runErr)
+	}
+	if err := printCounts(ctx, st, acct.ID); err != nil {
+		return err
+	}
+	if runErr != nil {
+		return fmt.Errorf("%w; the rest of the cache was updated, fix the mailboxes above and run again", runErr)
+	}
+	return nil
 }
 
 // ensurePinned makes one connection attempt to find out whether the Bridge
