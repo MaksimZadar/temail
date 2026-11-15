@@ -149,6 +149,38 @@ func (m *MailService) shutdown() error {
 	}
 }
 
+// CacheInfoDTO is the local cache size, for the footer. Bytes is the size on
+// disk of the database and its -wal and -shm files. Messages and Bodies count
+// the rows of the configured account (0 when no account is configured).
+type CacheInfoDTO struct {
+	Bytes    int64 `json:"bytes"`
+	Messages int64 `json:"messages"`
+	Bodies   int64 `json:"bodies"`
+}
+
+// CacheInfo returns the local cache size and row counts. It only reads the
+// cache and the file sizes. It never connects to Bridge and never touches the
+// mailbox. Cheap enough to poll during a sync.
+func (m *MailService) CacheInfo(ctx context.Context) (CacheInfoDTO, error) {
+	ctx, end, err := m.begin(ctx)
+	if err != nil {
+		return CacheInfoDTO{}, err
+	}
+	defer end()
+	acct, err := m.accountID()
+	if errors.Is(err, bridge.ErrNotConfigured) {
+		// No account: the file sizes still count, and no rows belong to it.
+		acct = ""
+	} else if err != nil {
+		return CacheInfoDTO{}, err
+	}
+	st, err := m.st.CacheStats(ctx, acct)
+	if err != nil {
+		return CacheInfoDTO{}, fmt.Errorf("read cache stats: %w", err)
+	}
+	return CacheInfoDTO{Bytes: st.Bytes, Messages: st.Messages, Bodies: st.Bodies}, nil
+}
+
 // ListMailboxes returns the cached mailbox list, INBOX first.
 func (m *MailService) ListMailboxes(ctx context.Context) ([]MailboxDTO, error) {
 	ctx, end, err := m.begin(ctx)

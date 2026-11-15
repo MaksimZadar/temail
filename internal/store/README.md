@@ -131,6 +131,7 @@ write method runs in one transaction. Batch writes (`UpsertHeaders`,
 | `MarkBodyFailed` | Count a failed body fetch. |
 | `PendingBodies` | Up to N messages with no body and fewer than `MaxBodyAttempts` (3) failures, newest first. Takes a `*PendingCursor` (the last message of the previous page; nil for the first page), so paging visits each message once. |
 | `Counts` | Messages and cached bodies per mailbox. |
+| `CacheStats` | On-disk bytes (db, `-wal`, `-shm`) and the message and body totals of one account. Index-only counts, see `sqlite.go`. |
 
 ## Tests
 

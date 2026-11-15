@@ -105,6 +105,15 @@ type MailboxCounts struct {
 	Bodies   int
 }
 
+// CacheStats is the size of the cache on disk and the number of cached rows of
+// one account. Bytes covers the database file and its -wal and -shm files; a
+// missing file counts as 0.
+type CacheStats struct {
+	Bytes    int64
+	Messages int64
+	Bodies   int64
+}
+
 // Store is the cache API. Every method is safe for concurrent use. Write
 // methods run in one transaction each, so a cancelled or failed call leaves
 // no partial state.
@@ -161,6 +170,9 @@ type Store interface {
 
 	// Counts returns the message and body counts of every mailbox of the account.
 	Counts(ctx context.Context, account string) ([]MailboxCounts, error)
+	// CacheStats returns the on-disk size and the message and body totals of
+	// the account. It only reads: it does not scan rows (see sqlite.go).
+	CacheStats(ctx context.Context, account string) (CacheStats, error)
 
 	// Close closes the database.
 	Close() error
