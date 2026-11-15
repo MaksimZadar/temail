@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/MaksimZadar/temail/internal/bridge"
@@ -28,6 +29,15 @@ type MailService struct {
 	st   store.Store
 	cfg  ConfigStore
 	sess *bridge.Session
+
+	// drainWait bounds shutdown's wait for in-flight calls. Zero means shutdownWait.
+	drainWait time.Duration
+
+	mu         sync.Mutex // guards closed; begin adds to wg under it
+	closed     bool
+	base       context.Context // cancelled by shutdown: stops in-flight calls
+	cancelBase context.CancelFunc
+	wg         sync.WaitGroup // in-flight bound calls
 }
 
 // NewMailService returns a MailService. sec supplies the password for the
@@ -48,7 +58,8 @@ func NewMailService(st store.Store, cfg ConfigStore, sec PasswordSource, newClie
 		}
 		return c.Bridge[idx], pw, nil
 	}
-	return &MailService{st: st, cfg: cfg, sess: bridge.NewSession(resolve, newClient)}
+	base, cancel := context.WithCancel(context.Background())
+	return &MailService{st: st, cfg: cfg, sess: bridge.NewSession(resolve, newClient), base: base, cancelBase: cancel}
 }
 
 // PasswordSource reads the Bridge password. secrets.Store satisfies it.
@@ -86,10 +97,65 @@ type AttachmentDTO struct {
 	Data        []byte `json:"data"`
 }
 
+// begin registers one bound call. The call's context ends when the Wails
+// context ends, when fetchTimeout passes, or when the service shuts down. end
+// must be called when the call returns. After shutdown, begin fails with
+// ErrClosed.
+func (m *MailService) begin(ctx context.Context) (context.Context, func(), error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, nil, ErrClosed
+	}
+	m.wg.Add(1)
+	cctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	stop := context.AfterFunc(m.base, cancel)
+	return cctx, func() {
+		stop()
+		cancel()
+		m.wg.Done()
+	}, nil
+}
+
+// shutdown refuses new calls, cancels running ones, closes the Bridge session
+// and waits up to shutdownWait for in-flight calls. It is idempotent.
+func (m *MailService) shutdown() error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closed = true
+	m.mu.Unlock()
+
+	m.cancelBase()
+	sessErr := m.sess.Close()
+	drained := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(drained)
+	}()
+	wait := m.drainWait
+	if wait <= 0 {
+		wait = shutdownWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-drained:
+		return sessErr
+	case <-timer.C:
+		return errors.Join(sessErr, ErrInFlightTimeout)
+	}
+}
+
 // ListMailboxes returns the cached mailbox list, INBOX first.
-func (m *MailService) ListMailboxes() ([]MailboxDTO, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
-	defer cancel()
+func (m *MailService) ListMailboxes(ctx context.Context) ([]MailboxDTO, error) {
+	ctx, end, err := m.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer end()
 	acct, err := m.accountID()
 	if err != nil {
 		return nil, err
@@ -135,10 +201,15 @@ func (m *MailService) ListMailboxes() ([]MailboxDTO, error) {
 // ListMessages returns one page of cached headers of a mailbox, newest first.
 // Pass a nil cursor for the first page and the previous Next for later pages.
 // limit defaults to DefaultPageSize and is capped at store.MaxListLimit.
-func (m *MailService) ListMessages(mailbox string, cursor *PageCursor, limit int) (MessagePage, error) {
+func (m *MailService) ListMessages(ctx context.Context, mailbox string, cursor *PageCursor, limit int) (MessagePage, error) {
 	if err := checkMailbox(mailbox); err != nil {
 		return MessagePage{}, err
 	}
+	ctx, end, err := m.begin(ctx)
+	if err != nil {
+		return MessagePage{}, err
+	}
+	defer end()
 	if limit <= 0 {
 		limit = DefaultPageSize
 	}
@@ -151,8 +222,6 @@ func (m *MailService) ListMessages(mailbox string, cursor *PageCursor, limit int
 	if cursor != nil {
 		opts.Before = &store.Cursor{Date: cursor.Date, UID: cursor.UID}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
-	defer cancel()
 	headers, err := m.st.ListMessages(ctx, acct, mailbox, opts)
 	if err != nil {
 		return MessagePage{}, fmt.Errorf("read messages: %w", err)
@@ -172,30 +241,36 @@ func (m *MailService) ListMessages(mailbox string, cursor *PageCursor, limit int
 // attachment metadata. The body comes from the cache. If it is not cached, the
 // message is fetched from Bridge and stored. uidValidity must match the
 // cached epoch.
-func (m *MailService) GetMessage(mailbox string, uidValidity, uid uint32) (model.Message, error) {
+func (m *MailService) GetMessage(ctx context.Context, mailbox string, uidValidity, uid uint32) (model.Message, error) {
 	if err := checkMailbox(mailbox); err != nil {
 		return model.Message{}, err
 	}
 	if uid == 0 {
 		return model.Message{}, fmt.Errorf("%w: uid", ErrInvalidInput)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
-	defer cancel()
+	ctx, end, err := m.begin(ctx)
+	if err != nil {
+		return model.Message{}, err
+	}
+	defer end()
 	return m.loadMessage(ctx, mailbox, uidValidity, uid)
 }
 
 // GetAttachment returns the bytes of one attachment. partID must be one of the
 // parts listed for the message. The part is fetched from Bridge, and nothing is
 // written to disk. Content over MaxAttachmentBytes is refused.
-func (m *MailService) GetAttachment(mailbox string, uidValidity, uid uint32, partID string) (AttachmentDTO, error) {
+func (m *MailService) GetAttachment(ctx context.Context, mailbox string, uidValidity, uid uint32, partID string) (AttachmentDTO, error) {
 	if err := checkMailbox(mailbox); err != nil {
 		return AttachmentDTO{}, err
 	}
 	if uid == 0 || len(partID) > maxPartIDLen || !partIDPattern.MatchString(partID) {
 		return AttachmentDTO{}, fmt.Errorf("%w: attachment", ErrInvalidInput)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
-	defer cancel()
+	ctx, end, err := m.begin(ctx)
+	if err != nil {
+		return AttachmentDTO{}, err
+	}
+	defer end()
 	msg, err := m.loadMessage(ctx, mailbox, uidValidity, uid)
 	if err != nil {
 		return AttachmentDTO{}, err
@@ -288,10 +363,10 @@ func (m *MailService) loadMessage(ctx context.Context, mailbox string, uidValidi
 	return fetched, nil
 }
 
-// ServiceShutdown drops the on-demand Bridge connection. It is a lifecycle
-// hook, not a bound method. It does not wait for a running fetch.
+// ServiceShutdown is the Wails lifecycle hook. Shutdown already did the work,
+// so this only runs it again, which is a no-op.
 func (m *MailService) ServiceShutdown() error {
-	return m.sess.Close()
+	return m.shutdown()
 }
 
 // accountID returns the ID of the first account in config.json.

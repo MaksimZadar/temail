@@ -17,12 +17,17 @@ import (
 
 // SyncService runs internal/sync in the background and reports it to the
 // frontend with events. At most one run is active at a time. The run starts
-// with the app when an account is configured, pinned and has a password, and
-// again after SetupService changes the account or the pin.
+// with the app when an account is ready (in the background, so a locked
+// keychain cannot block startup), and again after SetupService changes the
+// account or the pin.
+//
+// A generation counter (gen) guards launches: Stop bumps it, and a launch that
+// read its credentials before a Stop or restart drops itself. So a restart
+// starts exactly one run, with credentials read after the restart.
 //
 // Events: sync:progress (ProgressEvent), sync:done (SyncResult, which may list
 // MailboxErrors), sync:error (SyncErrorEvent). A run stopped by Stop or by
-// shutdown emits no event; Status shows it as not running.
+// shutdown emits no outcome event; Status shows it as not running.
 type SyncService struct {
 	st        store.Store
 	cfg       ConfigStore
@@ -33,15 +38,19 @@ type SyncService struct {
 	// bodyDelay and backoff override the sync defaults. Zero means default.
 	bodyDelay time.Duration
 	backoff   time.Duration
-	// stopWait bounds Stop. Zero means syncStopWait.
-	stopWait time.Duration
+	// stopWait bounds Stop, and autostartWait bounds the startup launch. Zero
+	// means the package default.
+	stopWait      time.Duration
+	autostartWait time.Duration
 
-	mu         sync.Mutex
-	base       context.Context // parent of every run; set by ServiceStartup
-	cancel     context.CancelFunc
-	done       chan struct{} // closed when the active run has finished emitting
-	lastResult *SyncResult
-	lastError  string
+	mu           sync.Mutex
+	base         context.Context // parent of every run; set by ServiceStartup
+	gen          uint64          // bumped by Stop; stale launches drop out
+	cancel       context.CancelFunc
+	done         chan struct{} // non-nil while a run is active; closed when it has finished emitting
+	stopTimedOut bool          // Stop gave up waiting for the active run
+	lastResult   *SyncResult
+	lastError    string
 }
 
 // NewSyncService returns a SyncService. It does not start a run; the app
@@ -57,9 +66,10 @@ var (
 
 // SyncStatus is the state of the sync. It contains no secrets.
 type SyncStatus struct {
-	Running    bool        `json:"running"`
-	LastResult *SyncResult `json:"lastResult"`
-	LastError  string      `json:"lastError"`
+	Running      bool        `json:"running"`
+	StopTimedOut bool        `json:"stopTimedOut"`
+	LastResult   *SyncResult `json:"lastResult"`
+	LastError    string      `json:"lastError"`
 }
 
 // SyncResult summarises one run, as in internal/sync.Result.
@@ -93,19 +103,43 @@ type SyncErrorEvent struct {
 	Message string `json:"message"`
 }
 
-// ServiceStartup records the app context, which lives until shutdown, and
-// starts a run if the account is ready. Not being ready is not an error here.
+// ServiceStartup records the app context and starts the autostart in the
+// background. It returns at once, so startup never waits for the keychain.
 func (s *SyncService) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
 	s.mu.Lock()
 	s.base = ctx
 	s.mu.Unlock()
-	if err := s.start(); err != nil {
-		log.Printf("temail: sync not started: %v", err)
-	}
+	go s.autostart()
 	return nil
 }
 
-// ServiceShutdown stops the active run and waits for it.
+// autostart runs start with a deadline. If the credentials read (which may wait
+// on a locked keychain) takes too long, the launch is cancelled by bumping gen,
+// so it cannot start a run later without the user asking.
+func (s *SyncService) autostart() {
+	wait := s.autostartWait
+	if wait <= 0 {
+		wait = autostartWait
+	}
+	res := make(chan error, 1)
+	go func() { res <- s.start() }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-res:
+		if err != nil {
+			log.Printf("temail: sync not started: %v", err)
+		}
+	case <-timer.C:
+		s.mu.Lock()
+		s.gen++
+		s.mu.Unlock()
+		log.Printf("temail: sync autostart timed out (the keychain may be locked); start sync from the app")
+	}
+}
+
+// ServiceShutdown stops the active run. It is a lifecycle hook, not a bound
+// method. Shutdown (in shutdown.go) does the ordered teardown.
 func (s *SyncService) ServiceShutdown() error {
 	return s.Stop()
 }
@@ -117,10 +151,13 @@ func (s *SyncService) Start() error {
 	return s.start()
 }
 
-// Stop cancels the active run and waits for it to finish. It is a no-op if no
-// run is active.
+// Stop cancels the active run and waits up to the stop wait for it. It always
+// invalidates launches that have not started yet. It is a no-op if no run is
+// active. On timeout it returns ErrSyncStopTimeout and Status reports
+// StopTimedOut until the run ends.
 func (s *SyncService) Stop() error {
 	s.mu.Lock()
+	s.gen++
 	cancel, done := s.cancel, s.done
 	s.mu.Unlock()
 	if done == nil {
@@ -137,19 +174,36 @@ func (s *SyncService) Stop() error {
 	case <-done:
 		return nil
 	case <-timer.C:
+		s.mu.Lock()
+		s.stopTimedOut = true
+		s.lastError = "sync did not stop within the time limit; it may still be running"
+		s.mu.Unlock()
 		return ErrSyncStopTimeout
 	}
 }
 
-// Status reports whether a run is active, and the outcome of the last one.
+// Status reports whether a run is active, whether a stop timed out, and the
+// outcome of the last run.
 func (s *SyncService) Status() SyncStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return SyncStatus{Running: s.done != nil, LastResult: s.lastResult, LastError: s.lastError}
+	return SyncStatus{
+		Running:      s.done != nil,
+		StopTimedOut: s.stopTimedOut,
+		LastResult:   s.lastResult,
+		LastError:    s.lastError,
+	}
 }
 
-// restart stops the active run, if any, and starts again with the current
-// configuration. A run that cannot start is not an error for the caller.
+// stillActive reports whether a run is still active (used by Shutdown).
+func (s *SyncService) stillActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.done != nil
+}
+
+// restart stops the active run (if any) and starts again. Stop bumps gen, so
+// the start below reads credentials after the stop and is the only launch.
 func (s *SyncService) restart() {
 	if err := s.Stop(); err != nil {
 		log.Printf("temail: restart sync: %v", err)
@@ -162,17 +216,18 @@ func (s *SyncService) restart() {
 
 func (s *SyncService) start() error {
 	s.mu.Lock()
-	running := s.done != nil
-	base := s.base
-	s.mu.Unlock()
-	if running {
+	if s.done != nil {
+		s.mu.Unlock()
 		return nil
 	}
+	gen := s.gen
+	base := s.base
+	s.mu.Unlock()
 	if base == nil {
 		base = context.Background()
 	}
 
-	// Credentials are read outside the lock: the keyring may be slow.
+	// Credentials are read outside the lock: the keyring may block.
 	acct, pw, err := bridge.Credentials(s.cfg, s.sec)
 	if err != nil {
 		return err
@@ -183,6 +238,11 @@ func (s *SyncService) start() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.gen != gen {
+		// A Stop (or restart) ran while we were reading credentials. Drop this
+		// launch; the stopper decides what runs next.
+		return nil
+	}
 	if s.done != nil {
 		return nil
 	}
@@ -223,6 +283,7 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 	s.mu.Lock()
 	s.cancel = nil
 	s.done = nil
+	s.stopTimedOut = false
 	s.lastResult = &dto
 	switch {
 	case stopped:
@@ -235,7 +296,7 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 
 	switch {
 	case stopped:
-		// No event: Stop and shutdown are not failures the user must see.
+		// No outcome event: Stop and shutdown are not failures the user must see.
 	case runErr != nil && !errors.Is(runErr, mailsync.ErrPartial):
 		s.emit(EventSyncError, SyncErrorEvent{Message: errText})
 	default:

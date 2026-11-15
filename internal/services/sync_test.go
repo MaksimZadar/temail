@@ -230,9 +230,7 @@ func TestParentContextCancellationStopsRun(t *testing.T) {
 	if err := fx.svc.ServiceStartup(ctx, serviceOptions()); err != nil {
 		t.Fatal(err)
 	}
-	if !fx.svc.Status().Running {
-		t.Fatal("ServiceStartup should autostart a ready account")
-	}
+	waitUntil(t, "background autostart", func() bool { return fx.svc.Status().Running })
 	cancel() // app shutdown cancels the startup context
 	fx.waitIdle(t)
 	assertNoOutcomeEvent(t, fx.ev)

@@ -17,6 +17,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"time"
 
@@ -76,17 +77,21 @@ const (
 	maxPasswordLen   = 1024
 	maxHostLen       = 253
 	DefaultPageSize  = 50
-	MaxAttachmentMiB = 25
+	MaxAttachmentMiB = 10
 	// MaxAttachmentBytes caps the attachment bytes returned to the frontend.
 	MaxAttachmentBytes = MaxAttachmentMiB << 20
 )
 
-// Timeouts for bound calls that talk to Bridge.
+// Timeouts for bound calls and lifecycle steps.
 const (
-	reachTimeout = time.Second
-	probeTimeout = 15 * time.Second
-	testTimeout  = 30 * time.Second
-	syncStopWait = 15 * time.Second
+	reachTimeout     = time.Second
+	probeTimeout     = 15 * time.Second
+	testTimeout      = 30 * time.Second
+	syncStopWait     = 15 * time.Second
+	autostartWait    = 10 * time.Second
+	shutdownWait     = 10 * time.Second
+	keyringTTL       = 30 * time.Second
+	keyringProbeWait = 2 * time.Second
 )
 
 // Errors returned to the frontend. Their messages are safe to show.
@@ -99,9 +104,29 @@ var (
 	ErrNoSuchAttachment   = errors.New("no attachment with that part ID")
 	ErrAttachmentTooLarge = errors.New("attachment is larger than the display limit")
 	ErrSyncStopTimeout    = errors.New("sync did not stop in time")
+	// ErrAlreadyPinned means the account has a different pinned certificate and
+	// the caller did not ask to replace it. The UI must show the re-pin flow.
+	ErrAlreadyPinned = errors.New("already_pinned: this account already has a pinned Bridge certificate; check the new fingerprint in Proton Bridge and confirm the replacement")
+	// ErrAccountChanged means the account's endpoint changed while a pin was being confirmed.
+	ErrAccountChanged = errors.New("the Bridge account changed while the certificate was being checked; try again")
+	// ErrKeyringLocked means the keychain did not answer in time, usually because it is locked.
+	ErrKeyringLocked = fmt.Errorf("%w: the keychain did not respond; it may be locked", secrets.ErrKeyringUnavailable)
+	// ErrClosed means a bound call arrived after shutdown began.
+	ErrClosed = errors.New("temail is shutting down")
+	// ErrInFlightTimeout means shutdown gave up waiting for mail reads to finish.
+	ErrInFlightTimeout = errors.New("mail reads did not finish in time")
 )
 
 // Dialer opens a TCP connection. net.Dialer satisfies it.
 type Dialer func(ctx context.Context, network, address string) (net.Conn, error)
 
 var defaultDialer Dialer = (&net.Dialer{}).DialContext
+
+// copyConfig returns a copy of c that shares no slices with it, so a caller
+// can change the copy and restore the original.
+func copyConfig(c config.Config) config.Config {
+	out := c
+	out.Bridge = append([]config.BridgeAccount(nil), c.Bridge...)
+	out.LLM.Providers = append([]config.LLMProvider(nil), c.LLM.Providers...)
+	return out
+}

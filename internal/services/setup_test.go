@@ -85,7 +85,7 @@ func TestGetStatus(t *testing.T) {
 			sec := newFakeSecrets()
 			sec.probeErr = tt.probeErr
 			s, _ := newSetup(t, newFakeConfig(tt.cfg), sec, &fakeClient{}, tt.reach)
-			got, err := s.GetStatus()
+			got, err := s.GetStatus(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,7 +111,7 @@ func TestGetStatusNeverDialsNonLoopback(t *testing.T) {
 		dialed = true
 		return nil, errors.New("should not be called")
 	}
-	got, err := s.GetStatus()
+	got, err := s.GetStatus(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestSaveAccountValidation(t *testing.T) {
 			cfg := newFakeConfig(config.Default())
 			sec := newFakeSecrets()
 			s, _ := newSetup(t, cfg, sec, &fakeClient{}, true)
-			err := s.SaveAccount(tt.host, tt.imap, tt.smtp, tt.tls, tt.username, tt.password)
+			err := s.SaveAccount(context.Background(), tt.host, tt.imap, tt.smtp, tt.tls, tt.username, tt.password)
 			if err == nil {
 				t.Fatal("want an error")
 			}
@@ -158,7 +158,7 @@ func TestSaveAccountCreatesAccountAndKeepsSecretOutOfConfig(t *testing.T) {
 	sec := newFakeSecrets()
 	s := NewSetupService(mgr, sec, (&clientFactory{c: &fakeClient{}}).new, nil)
 
-	if err := s.SaveAccount("127.0.0.1", 1143, 1025, "starttls", " me@proton.test ", testPassword); err != nil {
+	if err := s.SaveAccount(context.Background(), "127.0.0.1", 1143, 1025, "starttls", " me@proton.test ", testPassword); err != nil {
 		t.Fatalf("SaveAccount: %v", err)
 	}
 	if sec.pw["main"] != testPassword {
@@ -198,7 +198,7 @@ func TestSaveAccountUpdatesExistingAccount(t *testing.T) {
 			cfg := newFakeConfig(readyConfig())
 			sec := newFakeSecrets()
 			s, _ := newSetup(t, cfg, sec, &fakeClient{}, true)
-			if err := s.SaveAccount(tt.host, tt.imapPort, 1025, "starttls", "new@proton.test", testPassword); err != nil {
+			if err := s.SaveAccount(context.Background(), tt.host, tt.imapPort, 1025, "starttls", "new@proton.test", testPassword); err != nil {
 				t.Fatal(err)
 			}
 			got := cfg.current()
@@ -221,18 +221,18 @@ func TestSaveAccountKeyringFailureWritesNoConfig(t *testing.T) {
 	sec := newFakeSecrets()
 	sec.setErr = secrets.ErrKeyringUnavailable
 	s, _ := newSetup(t, cfg, sec, &fakeClient{}, true)
-	if err := s.SaveAccount("127.0.0.1", 1143, 1025, "starttls", "me", testPassword); !errors.Is(err, secrets.ErrKeyringUnavailable) {
+	if err := s.SaveAccount(context.Background(), "127.0.0.1", 1143, 1025, "starttls", "me", testPassword); !errors.Is(err, secrets.ErrKeyringUnavailable) {
 		t.Fatalf("err = %v", err)
 	}
-	if cfg.saveCount() != 0 {
-		t.Fatal("config written although the keyring failed")
+	if got := cfg.current(); len(got.Bridge) != 0 {
+		t.Fatalf("config not restored after the keyring failed: %+v", got.Bridge)
 	}
 }
 
 func TestProbeCertReturnsPresentedCertificateWithoutPassword(t *testing.T) {
 	c := &fakeClient{connectErr: &mail.UntrustedCertError{Fingerprint: presentFP, Subject: "CN=Bridge"}}
 	s, _ := newSetup(t, newFakeConfig(readyConfig()), newFakeSecrets(), c, true)
-	got, err := s.ProbeCert()
+	got, err := s.ProbeCert(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestTrustCertPinsOnlyTheFreshFingerprint(t *testing.T) {
 			cfg.cfg.Bridge[0].CertFingerprint = ""
 			c := &fakeClient{connectErr: &mail.UntrustedCertError{Fingerprint: tt.present, Subject: "CN=Bridge"}}
 			s, _ := newSetup(t, cfg, newFakeSecrets(), c, true)
-			err := s.TrustCert(tt.given)
+			err := s.TrustCert(context.Background(), tt.given, false)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("err = %v, want %v", err, tt.wantErr)
@@ -287,7 +287,7 @@ func TestTrustCertPinsOnlyTheFreshFingerprint(t *testing.T) {
 
 func TestTrustCertRefusesWhenNoAccount(t *testing.T) {
 	s, _ := newSetup(t, newFakeConfig(config.Default()), newFakeSecrets(), &fakeClient{}, true)
-	if err := s.TrustCert(presentFP); !errors.Is(err, bridge.ErrNotConfigured) {
+	if err := s.TrustCert(context.Background(), presentFP, false); !errors.Is(err, bridge.ErrNotConfigured) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -323,7 +323,7 @@ func TestTestConnectionCategories(t *testing.T) {
 			sec.getErr = tt.pwErr
 			c := &fakeClient{connectErr: tt.connErr}
 			s, _ := newSetup(t, newFakeConfig(tt.cfg), sec, c, true)
-			got, err := s.TestConnection()
+			got, err := s.TestConnection(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -348,7 +348,7 @@ func TestTestConnectionUsesStoredPasswordReadOnly(t *testing.T) {
 	sec.pw["main"] = testPassword
 	c := &fakeClient{}
 	s, _ := newSetup(t, newFakeConfig(readyConfig()), sec, c, true)
-	if _, err := s.TestConnection(); err != nil {
+	if _, err := s.TestConnection(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(c.passwords) != 1 || c.passwords[0] != testPassword {
@@ -371,7 +371,7 @@ func TestErrorsMentionNoSecret(t *testing.T) {
 	sec.getErr = errors.New("dbus: " + "no service")
 	c := &fakeClient{}
 	s, _ := newSetup(t, newFakeConfig(readyConfig()), sec, c, true)
-	res, _ := s.TestConnection()
+	res, _ := s.TestConnection(context.Background())
 	if strings.Contains(res.Message, testPassword) {
 		t.Fatal("secret in message")
 	}
