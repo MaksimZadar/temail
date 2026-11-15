@@ -6,20 +6,42 @@
 </script>
 
 <footer class="footer">
-  <div class="left" role="status" aria-live="polite">
+  <div class="left">
     {#if app.route === "main"}
-      <span
-        class="dot"
-        class:busy={sync.running}
-        class:bad={!!sync.error}
-        aria-hidden="true"
-      ></span>
-      <span>{sync.text}</span>
-      {#if sync.fraction !== null}
-        <span class="bar" aria-hidden="true"
-          ><span style:width="{sync.fraction * 100}%"></span></span
+      <button
+        class="status"
+        type="button"
+        title="Show sync details"
+        aria-haspopup="dialog"
+        aria-expanded={ui.overlay === "sync"}
+        onclick={() => (ui.overlay = ui.overlay === "sync" ? "none" : "sync")}
+      >
+        <span
+          class="dot"
+          class:busy={sync.running}
+          class:bad={!!sync.error}
+          aria-hidden="true"
+        ></span>
+        <span>{sync.text}</span>
+        {#if sync.fraction !== null}
+          <span class="bar" aria-hidden="true"
+            ><span style:width="{sync.fraction * 100}%"></span></span
+          >
+        {/if}
+      </button>
+      {#if !sync.running && sync.failed.length > 0}
+        <button
+          class="link warn"
+          type="button"
+          onclick={() => (ui.overlay = "sync")}
         >
+          Some folders couldn't sync
+        </button>
       {/if}
+      <!-- Announces only when a run starts or ends. -->
+      <span class="sr-only" role="status" aria-live="polite"
+        >{sync.announcement}</span
+      >
     {/if}
     {#if ui.hint}<span class="hint">{ui.hint}</span>{/if}
   </div>
@@ -58,6 +80,20 @@
     align-items: center;
     gap: 0.5rem;
   }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: none;
+    border: 0;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    color: inherit;
+  }
+  .status:hover {
+    color: var(--fg);
+    background: var(--accent-soft);
+  }
   .dot {
     width: 0.5rem;
     height: 0.5rem;
@@ -87,6 +123,7 @@
     display: block;
     height: 100%;
     background: var(--accent);
+    transition: width 0.25s ease-out;
   }
   .hint {
     color: var(--fg);
@@ -103,6 +140,10 @@
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
     color: inherit;
+  }
+  .link.warn {
+    color: var(--warn);
+    text-decoration: underline;
   }
   .link:hover {
     color: var(--fg);

@@ -8,6 +8,7 @@
   import Footer from "./lib/components/Footer.svelte";
   import HelpOverlay from "./lib/components/HelpOverlay.svelte";
   import Palette from "./lib/components/Palette.svelte";
+  import SyncPanel from "./lib/components/SyncPanel.svelte";
   import WhichKey from "./lib/components/WhichKey.svelte";
 
   $effect(() => {
@@ -23,6 +24,8 @@
       onPendingChange: (p, c) => ui.setPending(p, c),
       onHint: (t) => ui.flash(t),
     });
+    ui.cancelKeys = () => d.reset();
+    ui.triggerBinding = (b) => d.trigger(b);
     const offs = [
       ui.register(
         "help.toggle",
@@ -31,10 +34,17 @@
       ui.register("palette.open", () => (ui.overlay = "palette")),
     ];
     const onKey = (e: KeyboardEvent): void => void d.handle(e);
+    // A click anywhere outside the which-key popover cancels a pending prefix.
+    const onClick = (e: MouseEvent): void => {
+      if (d.isPending && !(e.target as Element | null)?.closest?.(".wk"))
+        d.reset();
+    };
     window.addEventListener("keydown", onKey);
+    window.addEventListener("click", onClick);
     void app.load();
     return () => {
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("click", onClick);
       offs.forEach((f) => f());
     };
   });
@@ -54,6 +64,7 @@
 </div>
 {#if ui.overlay === "help"}<HelpOverlay />{/if}
 {#if ui.overlay === "palette"}<Palette />{/if}
+{#if ui.overlay === "sync"}<SyncPanel />{/if}
 <WhichKey />
 
 <style>

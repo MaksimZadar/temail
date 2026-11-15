@@ -2,6 +2,7 @@
 // replace this whole module, so nothing else imports the bindings directly.
 import { Events } from "@wailsio/runtime";
 import {
+  MailService,
   SetupService,
   SyncService,
 } from "../../bindings/github.com/MaksimZadar/temail/internal/services";
@@ -37,6 +38,11 @@ export interface SyncStatus {
   lastResult: SyncResult | null;
   lastError: string;
 }
+export interface MailboxInfo {
+  name: string;
+  displayName: string;
+  messages: number;
+}
 export interface ProgressEvent {
   state: string;
   mailbox: string;
@@ -70,6 +76,8 @@ export const trustCert = (
 ): Promise<void> => SetupService.TrustCert(fingerprint, replace);
 export const testConnection = (): Promise<ConnectionTest> =>
   SetupService.TestConnection();
+export const listMailboxes = (): Promise<MailboxInfo[]> =>
+  MailService.ListMailboxes();
 export const syncStart = (): Promise<void> => SyncService.Start();
 export const syncStatus = (): Promise<SyncStatus> => SyncService.Status();
 
