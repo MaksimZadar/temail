@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"log"
+	"log/slog"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -42,10 +43,11 @@ func main() {
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
 		},
+		// Wails logs bound-call arguments and results at Debug, which would
+		// include the Bridge password and message bodies. Never Debug.
+		LogLevel: slog.LevelInfo,
 	})
 
-	// Shutdown order: this hook runs first (stop sync, close the cache), then
-	// the services shut down (the Bridge session is closed by MailService).
 	syncSvc := services.NewSyncService(st, cfg, keyring, mail.NewClient, app.Event)
 	mailSvc := services.NewMailService(st, cfg, keyring, mail.NewClient)
 	setupSvc := services.NewSetupService(cfg, keyring, mail.NewClient, syncSvc)
@@ -53,12 +55,12 @@ func main() {
 	app.RegisterService(application.NewService(mailSvc))
 	app.RegisterService(application.NewService(setupSvc))
 
+	// The ordered teardown (sync, mail reads, then the cache) runs in this hook,
+	// before the services' own shutdown hooks. It leaves the cache open if a
+	// run or a read did not finish in time.
 	app.OnShutdown(func() {
-		if err := syncSvc.Stop(); err != nil {
-			log.Printf("temail: stop sync: %v", err)
-		}
-		if err := st.Close(); err != nil {
-			log.Printf("temail: close cache: %v", err)
+		if err := services.Shutdown(syncSvc, mailSvc, st); err != nil {
+			log.Printf("temail: shutdown incomplete: %v", err)
 		}
 	})
 
