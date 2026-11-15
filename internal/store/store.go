@@ -198,6 +198,10 @@ type Store interface {
 
 	// Counts returns the message and body counts of every mailbox of the account.
 	Counts(ctx context.Context, account string) ([]MailboxCounts, error)
+	// MessageCounts returns the number of placements per mailbox of the account.
+	// It is a single grouped count on the placement primary key, with no body
+	// join, so the change check can run on a timer.
+	MessageCounts(ctx context.Context, account string) (map[string]int, error)
 	// MembershipOfMessages returns the placements of many messages in one query,
 	// keyed by message id. Messages without placements are absent.
 	MembershipOfMessages(ctx context.Context, account string, mids []string) (map[string][]Placement, error)
