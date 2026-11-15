@@ -84,11 +84,17 @@ func (s *Syncer) backoff(n int) time.Duration {
 // connection first, so a half-open socket is replaced. A failure is wrapped in
 // connError.
 func (s *Syncer) reconnect(ctx context.Context) error {
+	// A login that was refused with these credentials is not attempted again.
+	if err := s.opts.Auth.Check(s.opts.CredsKey); err != nil {
+		s.connected = false
+		return err
+	}
 	if err := s.connect(ctx); err != nil {
 		s.connected = false
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
+		s.opts.Auth.Trip(s.opts.CredsKey, err)
 		return &connError{err: err}
 	}
 	s.connected = true

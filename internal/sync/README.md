@@ -169,9 +169,10 @@ extra logic, and it costs one `ListUIDs` and one local read per mailbox. The
 
 After the first sync, `Watcher` keeps the cache current. It has two triggers.
 
-- **IDLE** on a second connection, on All Mail, or on INBOX when All Mail is
-  hidden. go-imap re-issues IDLE before the server's timeout. A new message,
-  an expunge or a flag change sends a signal to the check.
+- **IDLE** on a second connection, on **INBOX**. go-imap re-issues IDLE before
+  the server's timeout. A new message, an expunge or a flag change in INBOX sends
+  a signal to the check. IDLE is not run on All Mail: a SELECT of All Mail is
+  expensive, and its changes are found by the reconcile timer (see below).
 - **Reconcile timer.** Every 120 s with IDLE, or every 30 s without it. It is a
   backstop for changes IDLE does not report.
 
@@ -183,34 +184,70 @@ compares the server with the cache:
 |--------|-------|--------|
 | mailbox list differs | | full `Run` (new or removed mailbox) |
 | UIDVALIDITY differs | | that mailbox is resynced (its placements are purged) |
-| UIDNEXT-1 above highest UID | | new mail: that mailbox is synced |
+| UIDNEXT differs from the stored UIDNEXT | | new mail or an expunge at the top: that mailbox is synced |
 | MESSAGES differs | | a message was added or removed: synced |
-| UNSEEN differs | | a read or unread change: synced |
+| UNSEEN differs (not All Mail) | | a read or unread change: synced |
 | never synced | | synced |
 
 A changed mailbox is synced incrementally by `RunChanged`: the planner fetches
 only UIDs that are not cached, the reconcile removes what is gone, and the body
 queue holds only messages without a body. The result is then reported.
 
-**Flags only.** A change to `\Flagged` alone does not move any of the counts
-above, so `STATUS` cannot see it. IDLE does see it, and the next check picks it
-up. If IDLE is not available, such a change waits for the next full sync.
+**UIDNEXT is compared with the stored value, not the highest UID.** The sync
+records the server's UIDNEXT (`mailboxes.uidnext`). If the newest message is
+appended and then expunged, UIDNEXT is one above the highest UID for good. A
+comparison with the highest UID would resync that mailbox at every check. With
+the stored value, the mailbox is synced once and is then quiet
+(`TestAppendAndExpungeTopUIDResyncsOnce`).
+
+**All Mail's unseen count is not compared.** Reading a message in All Mail
+changes the unseen count of every mailbox that holds it, and All Mail's count is
+the largest. Comparing it would resync All Mail (a SELECT) for every read.
+
+**Flag sweep.** Flag changes that STATUS cannot see (a flag change in All Mail,
+or a `\Flagged` change in a label) are picked up by a slower sweep: every 15
+minutes (`FlagSweepInterval`), All Mail is added to the check and resynced. This
+is the one place a SELECT of All Mail happens on a timer. IDLE on INBOX covers
+the flags a user sees first.
+
+**Flags only, otherwise.** A flag change in a mailbox other than All Mail that
+moves no count is caught by IDLE on INBOX when the mailbox is INBOX. Elsewhere it
+waits for the flag sweep or the next full sync.
 
 **Bursts.** A signal waits for `Debounce` (500 ms) and drains any others, so a
 burst is one check.
 
 **Errors.** A transport failure backs off (doubling, up to five minutes) and
-retries. A check that fails with a per-mailbox error is reported in
-`mailboxErrors` and does not stop the watcher. An authentication failure or a
-certificate error stops the watcher, and the service emits `sync:error`. Those
-errors are not retried, because each failed login counts toward Bridge's limit.
+retries. An IDLE session that lasted at least two minutes resets the backoff, so
+a long session that ends does not leave the next retry at the maximum. A check
+that fails with a per-mailbox error is reported in `mailboxErrors` and does not
+stop the watcher. An authentication failure or a certificate error stops the
+watcher, and the service emits `sync:error`.
+
+**One strike for every login path.** Bridge counts failed logins across all
+clients, so the sync connection, the poll and the IDLE connection share one
+`AuthLatch`. After a refused login, none of them logs in again with the same
+credentials. A changed password or account clears the latch (its key is a hash
+of the connection settings and the password), and so does an app restart. The
+latch is checked before every login and tripped after every refused one. Tests:
+`TestTwoPathsOneStrike`, `TestAuthLatchUntilCredentialsChange`,
+`TestServiceAuthLatchOneStrike`.
+
+**One connection per run.** `Run` leaves its connection open. The service closes
+the client when the whole run (sync and watcher) ends. So the watcher's checks
+reuse the sync's login (`TestRunLeavesConnectionForWatcher`,
+`TestServiceWatcherReusesSyncConnection`). The `mailsync` CLI closes its own.
+
+**Kick.** `Watcher.Kick` asks for a check as soon as the debounce allows. The
+service calls it when a sync is requested while the watcher is running.
 
 **Shutdown.** `Run` returns only after the IDLE goroutine has ended and its
 connection is closed (`TestShutdownLeavesNoIdleGoroutine`).
 
 **No IDLE.** When the server does not offer IDLE, or Bridge has turned it off,
 the watcher does not start an IDLE connection. It polls at the shorter period
-(`TestIdleLessFallbackPolls`).
+(`TestIdleLessFallbackPolls`). `IdleActive` is true only after IDLE has actually
+started, not while the connection is being made (`TestIdleReportedOnlyAfterStart`).
 
 ## Future work
 
@@ -222,6 +259,12 @@ the watcher does not start an IDLE connection. It polls at the shorter period
   implemented.
 
 ## Tests
+
+`watch_fix_test.go` covers the UIDNEXT comparison (append and expunge of the top
+UID), All Mail's unseen count not triggering a check, a count change in All Mail
+still triggering, the flag sweep, Kick, the one-strike latch across the sync and
+IDLE paths, the latch's key behaviour, the single login per run, the backoff
+reset after a long IDLE session, and IdleActive timing.
 
 `watch_test.go` covers an IDLE update that triggers an incremental sync (cached
 messages are not fetched again), each STATUS difference case, an unchanged check

@@ -43,9 +43,10 @@ store gives the header a synthetic id.
 share the client's operation lock. The watcher logs in with the same pin and TLS
 rules as `Client.Connect`.
 
-- `Idle(ctx, mailbox, onChange)` selects the mailbox with EXAMINE (read-only),
-  starts IDLE, and calls `onChange` for each unsolicited update (new messages,
-  expunges, fetches). The callback runs on the read loop, so it only sends a
+- `Idle(ctx, mailbox, started, onChange)` selects the mailbox with EXAMINE
+  (read-only), starts IDLE, and calls `started` once IDLE has actually begun, so
+  the caller never reports "watching" for a session that failed to start. It then
+  calls `onChange` for each unsolicited update (new messages, expunges, fetches). The callback runs on the read loop, so it only sends a
   signal. It returns when `ctx` ends, or when the server ends IDLE with an error.
   go-imap re-issues IDLE by itself before the server's timeout.
 - `ErrIdleUnsupported` is returned when the capability list has no `IDLE`.
