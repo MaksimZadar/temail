@@ -43,7 +43,9 @@ var (
 	// ErrKeyNeedsReentry means a key exists (keyring or environment) that was not
 	// approved for this base URL. The key is not used, so the user must enter it
 	// again for this address.
-	ErrKeyNeedsReentry = errors.New("an API key exists that was not approved for this base URL; enter the API key again")
+	// The message starts with the category token, so the UI can match it in the
+	// text Wails passes on (ListModels returns this error as is).
+	ErrKeyNeedsReentry = errors.New("key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again")
 	// ErrEnableDeclined means enabling a cloud provider was not confirmed in the
 	// native dialog (or no dialog was available). Nothing was saved.
 	ErrEnableDeclined = errors.New("enabling a cloud LLM provider was not confirmed; nothing was saved")
@@ -119,6 +121,10 @@ type ProviderTest struct {
 const (
 	CategoryCloudDisabled = "cloud_disabled"
 	CategoryNoModel       = "no_model"
+	// CategoryKeyNeedsReentry means a key exists but was not approved for the
+	// provider's base URL. The user must enter the key again. It is not a
+	// network or server failure.
+	CategoryKeyNeedsReentry = "key_needs_reentry"
 )
 
 // ListProviders returns every configured provider, the default one marked. It
@@ -473,6 +479,8 @@ func categorizeLLM(err error) ProviderTest {
 		cat, msg = CategoryCloudDisabled, "This cloud provider is turned off. Enable it before testing or sending content."
 	case errors.Is(err, llm.ErrNoModel):
 		cat, msg = CategoryNoModel, "Set a model name for this provider first."
+	case errors.Is(err, ErrKeyNeedsReentry):
+		cat, msg = CategoryKeyNeedsReentry, "The stored API key was not approved for this base URL. Enter the API key again."
 	case errors.Is(err, secrets.ErrKeyringUnavailable):
 		cat, msg = CategoryKeyringDown, "The OS keychain is not available, so the API key cannot be read."
 	case errors.Is(err, llm.ErrInvalidOutput):

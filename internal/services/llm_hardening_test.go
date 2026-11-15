@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/MaksimZadar/temail/internal/config"
+	"github.com/MaksimZadar/temail/internal/llm"
 	"github.com/MaksimZadar/temail/internal/secrets"
 )
 
@@ -327,5 +328,79 @@ func TestNewErrorsCarryNoKey(t *testing.T) {
 	}
 	if !json.Valid([]byte(`{}`)) {
 		t.Fatal("unreachable")
+	}
+}
+
+// A key that is not approved for the current base URL is its own category, so
+// the UI can ask for the key again instead of showing a generic failure.
+func TestTestProviderReportsKeyNeedsReentry(t *testing.T) {
+	tests := []struct {
+		name    string
+		binding string // "" means no approval at all
+	}{
+		{"binding for another URL", config.BaseURLBinding("http://127.0.0.1:1111/v1")},
+		{"no approval recorded", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys := newFakeKeys()
+			keys.keys["ollama"] = llmKey
+			cfg := llmConfig()
+			cfg.LLM.Providers[0].KeyBinding = tt.binding
+			svc, _ := newLLMSvc(t, cfg, keys)
+
+			got, err := svc.TestProvider(context.Background(), "ollama")
+			if err != nil {
+				t.Fatalf("TestProvider returned a Go error: %v", err)
+			}
+			if got.OK || got.Category != "key_needs_reentry" {
+				t.Fatalf("got %+v, want category key_needs_reentry", got)
+			}
+			if got.Message == "" || strings.Contains(got.Message, "other") {
+				t.Fatalf("message = %q", got.Message)
+			}
+			raw, _ := json.Marshal(got)
+			if strings.Contains(string(raw), llmKey) {
+				t.Fatal("key in the test result")
+			}
+		})
+	}
+}
+
+// ListModels returns the sentinel as is, and its text starts with the token the
+// UI matches. No key appears in it.
+func TestListModelsKeyNeedsReentryIsMatchable(t *testing.T) {
+	keys := newFakeKeys()
+	keys.keys["ollama"] = llmKey
+	cfg := llmConfig()
+	cfg.LLM.Providers[0].KeyBinding = config.BaseURLBinding("http://127.0.0.1:1111/v1")
+	svc, _ := newLLMSvc(t, cfg, keys)
+
+	ids, err := svc.ListModels(context.Background(), "ollama")
+	if !errors.Is(err, ErrKeyNeedsReentry) {
+		t.Fatalf("err = %v, want ErrKeyNeedsReentry", err)
+	}
+	if ids == nil || len(ids) != 0 {
+		t.Fatalf("ids = %v, want an empty non-nil list", ids)
+	}
+	const token = "key_needs_reentry"
+	if !strings.HasPrefix(err.Error(), token+":") {
+		t.Fatalf("Wails-visible text %q does not start with %q", err.Error(), token)
+	}
+	if strings.Contains(fmt.Sprintf("%v %+v", err, err), llmKey) {
+		t.Fatal("key in the ListModels error")
+	}
+}
+
+// The other categories are unchanged by the new one.
+func TestOtherCategoriesUnchangedByKeyNeedsReentry(t *testing.T) {
+	if got := categorizeLLM(ErrKeyNeedsReentry); got.Category != CategoryKeyNeedsReentry {
+		t.Fatalf("mapping = %q", got.Category)
+	}
+	if got := categorizeLLM(errors.New("some other failure")); got.Category != "other" {
+		t.Fatalf("unrelated error = %q, want other", got.Category)
+	}
+	if got := categorizeLLM(llm.ErrCloudDisabled); got.Category != CategoryCloudDisabled {
+		t.Fatalf("cloud disabled = %q", got.Category)
 	}
 }
