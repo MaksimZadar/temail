@@ -255,3 +255,85 @@ func TestOldConfigFileLoadsUnchanged(t *testing.T) {
 		t.Fatalf("old cloud provider must default to disabled cloud, got kind=%s enabled=%v", p.EffectiveKind(), p.IsEnabled())
 	}
 }
+
+// Fix 1: names that fold to the same TEMAIL_LLM_<NAME>_KEY are refused.
+func TestEnvNameCollisionIsRefused(t *testing.T) {
+	tests := []struct {
+		name    string
+		a, b    string
+		wantErr bool
+	}{
+		{"dash and underscore fold together", "open-router", "open_router", true},
+		{"case folds together", "OpenRouter", "openrouter", true},
+		{"distinct names are fine", "openrouter", "ollama", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Default()
+			c.LLM.Providers = []LLMProvider{
+				{Name: tt.a, BaseURL: "http://127.0.0.1:1/v1"},
+				{Name: tt.b, BaseURL: "http://127.0.0.1:2/v1"},
+			}
+			err := Validate(c)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "collides") {
+				t.Fatalf("message should say it collides: %v", err)
+			}
+		})
+	}
+}
+
+// Fix 1: the key binding is a fingerprint of the normalised base URL.
+func TestBaseURLBindingNormalisesAndKeyBoundTo(t *testing.T) {
+	a := BaseURLBinding("https://OpenRouter.ai/api/v1/")
+	b := BaseURLBinding("https://openrouter.ai/api/v1")
+	if a != b || !ValidFingerprint(a) {
+		t.Fatalf("normalised bindings differ: %s vs %s", a, b)
+	}
+	if BaseURLBinding("https://openrouter.ai/api/v2") == a {
+		t.Fatal("different paths must bind differently")
+	}
+	p := LLMProvider{BaseURL: "https://openrouter.ai/api/v1", KeyBinding: a}
+	if !p.KeyBoundTo() {
+		t.Fatal("matching binding must allow the key")
+	}
+	p.BaseURL = "https://attacker.example/api/v1"
+	if p.KeyBoundTo() {
+		t.Fatal("a key must not be bound to a changed URL")
+	}
+	if (LLMProvider{BaseURL: "https://openrouter.ai/api/v1"}).KeyBoundTo() {
+		t.Fatal("no binding means no key approval")
+	}
+}
+
+func TestKeyBindingMustBeAFingerprint(t *testing.T) {
+	c := Default()
+	c.LLM.Providers = []LLMProvider{{Name: "x", BaseURL: "http://127.0.0.1:1/v1", KeyBinding: "not-hex"}}
+	if err := Validate(c); err == nil {
+		t.Fatal("a malformed keyBinding must be refused")
+	}
+}
+
+// Fix 6: no userinfo, query or fragment in a base URL.
+func TestBaseURLRejectsUserinfoQueryFragment(t *testing.T) {
+	bad := []string{
+		"https://user:pass@openrouter.ai/api/v1",
+		"https://openrouter.ai/api/v1?key=abc",
+		"https://openrouter.ai/api/v1?",
+		"https://openrouter.ai/api/v1#frag",
+	}
+	for _, raw := range bad {
+		c := Default()
+		c.LLM.Providers = []LLMProvider{{Name: "x", BaseURL: raw}}
+		if err := Validate(c); err == nil {
+			t.Fatalf("baseURL %q accepted", raw)
+		}
+	}
+	good := Default()
+	good.LLM.Providers = []LLMProvider{{Name: "x", BaseURL: "https://openrouter.ai/api/v1"}}
+	if err := Validate(good); err != nil {
+		t.Fatalf("plain URL refused: %v", err)
+	}
+}

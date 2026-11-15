@@ -3,11 +3,15 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
+
+	"github.com/MaksimZadar/temail/internal/secrets"
 )
 
 // SchemaVersion is the only config schema version this build reads and writes.
@@ -86,6 +90,31 @@ type LLMProvider struct {
 	Kind         string          `json:"kind,omitempty"`
 	Enabled      *bool           `json:"enabled,omitempty"`
 	Capabilities LLMCapabilities `json:"capabilities,omitempty"`
+	// KeyBinding is the BaseURLBinding of the base URL that the stored API key
+	// was approved for. It is not a secret. A key is used only while the base
+	// URL still has this binding (see KeyBoundTo), so a key never follows a URL
+	// change. Empty means no key was approved for this provider.
+	KeyBinding string `json:"keyBinding,omitempty"`
+}
+
+// BaseURLBinding returns the key-binding fingerprint of a base URL: the SHA-256
+// of its normalised form (lowercase scheme and host, no trailing slash on the
+// path). The URL is validated first, so it has no userinfo, query or fragment.
+// The result is not a secret.
+func BaseURLBinding(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	norm := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.EscapedPath(), "/")
+	sum := sha256.Sum256([]byte(norm))
+	return hex.EncodeToString(sum[:])
+}
+
+// KeyBoundTo reports whether a stored key may be used with this provider: the
+// provider has a binding and it matches the current base URL.
+func (p LLMProvider) KeyBoundTo() bool {
+	return p.KeyBinding != "" && p.KeyBinding == BaseURLBinding(p.BaseURL)
 }
 
 // LLMCapabilities are the structured-output features an endpoint supports.
@@ -210,6 +239,7 @@ func Validate(c Config) error {
 	}
 
 	names := make(map[string]bool, len(c.LLM.Providers))
+	envNames := make(map[string]string, len(c.LLM.Providers))
 	for i, p := range c.LLM.Providers {
 		where := fmt.Sprintf("llm.providers[%d]", i)
 		if strings.TrimSpace(p.Name) == "" {
@@ -218,6 +248,17 @@ func Validate(c Config) error {
 			add("%s: duplicate name %q", where, p.Name)
 		}
 		names[p.Name] = true
+		// Two names that map to the same environment variable (case and "-"/"_"
+		// fold together) would share one override. Refuse that.
+		if env := secrets.LLMEnvVar(p.Name); p.Name != "" {
+			if other, ok := envNames[env]; ok && other != p.Name {
+				add("%s: name %q collides with %q (both read %s)", where, p.Name, other, env)
+			}
+			envNames[env] = p.Name
+		}
+		if p.KeyBinding != "" && !ValidFingerprint(p.KeyBinding) {
+			add("%s: keyBinding must be a 64-character SHA-256 binding", where)
+		}
 		if err := validBaseURL(p.BaseURL); err != nil {
 			add("%s: baseURL %q: %v", where, p.BaseURL, err)
 		}
@@ -258,6 +299,13 @@ func ValidFingerprint(s string) bool {
 	return true
 }
 
+// ValidBaseURL reports whether raw is an acceptable provider base URL. See
+// validBaseURL.
+func ValidBaseURL(raw string) error { return validBaseURL(raw) }
+
+// validBaseURL requires an http(s) URL with a host and no userinfo, query or
+// fragment. Credentials in the URL, or a query carrying a token, would be sent
+// to the provider and kept in its logs, so those are refused.
 func validBaseURL(raw string) error {
 	if raw == "" {
 		return errors.New("required")
@@ -271,6 +319,15 @@ func validBaseURL(raw string) error {
 	}
 	if u.Host == "" {
 		return errors.New("missing host")
+	}
+	if u.User != nil {
+		return errors.New("must not contain user information")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return errors.New("must not contain a query")
+	}
+	if u.Fragment != "" || u.RawFragment != "" {
+		return errors.New("must not contain a fragment")
 	}
 	return nil
 }
