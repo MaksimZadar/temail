@@ -98,6 +98,7 @@ const res = (
     confidence: 0.9,
     reason: `because ${i}`,
     existing: true,
+    target: "label",
     ...l,
   })),
   summary: `About ${mid}`,
@@ -526,6 +527,53 @@ describe("cloud privacy", () => {
   });
 });
 
+describe("targets and waiting", () => {
+  it("shows label, folder and new targets; folders pre-tick at 60%", async () => {
+    await openWith([
+      res("mid5", [
+        { name: "Work" },
+        { name: "Finance", existing: false, target: "folder" },
+        { name: "Maybe", existing: false, target: "folder", confidence: 0.3 },
+        { name: "Fresh", existing: false, target: "new" },
+      ]),
+    ]);
+    expect(screen.getByText("add label")).toBeTruthy();
+    expect(screen.getAllByText("move to folder").length).toBe(2);
+    expect(
+      screen.getByTitle("Creates a new label on Proton (cannot be undone)"),
+    ).toBeTruthy();
+    const o = (n: string) =>
+      screen.getByRole("option", { name: new RegExp(n) });
+    expect(o("Finance").getAttribute("aria-selected")).toBe("true");
+    expect(o("Maybe").getAttribute("aria-selected")).toBe("false");
+    expect(o("Fresh").getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("an honest summary for moves and labels", async () => {
+    m.applySuggestions.mockResolvedValue(
+      applyOk({ applied: ["mid5"], auditIds: [1] }),
+    );
+    await openWith([
+      res("mid5", [
+        { name: "Work" },
+        { name: "Finance", existing: false, target: "folder" },
+      ]),
+    ]);
+    await key("a");
+    await screen.findByText("Moved 1 message to Finance, added 1 label");
+  });
+
+  it("shows elapsed time and a local-model hint while running", async () => {
+    m.listProviders.mockResolvedValue([provider()]);
+    m.suggest.mockResolvedValue("job1");
+    m.suggestStatus.mockResolvedValue({} as api.SuggestJob);
+    await mount();
+    await key("S");
+    await screen.findByText(/Local models can take a while/);
+    expect(screen.getByText("0:00")).toBeTruthy();
+  });
+});
+
 describe("accept", () => {
   it("sends only ticked labels per email, once, and closes with an undo toast", async () => {
     m.applySuggestions.mockResolvedValue(
@@ -545,7 +593,7 @@ describe("accept", () => {
     );
     emit(
       "suggest:result",
-      res("mid4", [{ name: "Brand new", existing: false }]),
+      res("mid4", [{ name: "Brand new", existing: false, target: "new" }]),
     );
     await screen.findByText("Work");
     await key("l");
@@ -557,7 +605,7 @@ describe("accept", () => {
       mid5: ["Work"],
       mid4: ["Brand new"],
     });
-    await screen.findByText("Applied 2 labels to 2 messages");
+    await screen.findByText("Added 2 labels to 2 messages");
     expect(
       screen.getByRole("button", { name: "Undo this action" }),
     ).toBeTruthy();
@@ -626,6 +674,7 @@ describe("accept", () => {
     await key("a");
     const al = await screen.findByText(/Couldn't create the new label/);
     expect(al).toBeTruthy();
+    expect(screen.getByTitle("x")).toBeTruthy();
     expect(screen.getByRole("dialog", { name: "Suggest labels" })).toBeTruthy();
     expect(suggest.applying).toBe(false);
   });

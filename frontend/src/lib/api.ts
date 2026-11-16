@@ -237,6 +237,8 @@ export interface SuggestLabel {
   reason: string;
   /** False means the label doesn't exist yet and will be created. */
   existing: boolean;
+  /** label: add an existing label; folder: move to that folder; new: create a label. */
+  target: "label" | "folder" | "new";
 }
 export interface SuggestResult {
   jobId: string;
