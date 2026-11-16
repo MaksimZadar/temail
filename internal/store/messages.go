@@ -681,11 +681,15 @@ func (s *sqliteStore) MembershipOf(ctx context.Context, key MessageKey) ([]Place
 	if err != nil {
 		return nil, err
 	}
+	// A placement from an older UIDVALIDITY epoch is stale: its UID no longer
+	// names the message on the server. The join on the mailbox epoch excludes
+	// those rows, so no caller ever acts on a stale UID.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT p.mailbox, mb.kind, mb.display_name, p.uidvalidity, p.uid
+		SELECT p.mailbox, mb.kind, mb.display_name, p.uidvalidity, p.uid, m.canonical
 		FROM placements p
 		JOIN mailboxes mb ON mb.account = p.account AND mb.name = p.mailbox
-		WHERE p.account = ? AND p.mid = ?
+		JOIN messages m ON m.account = p.account AND m.mid = p.mid
+		WHERE p.account = ? AND p.mid = ? AND p.uidvalidity = mb.uidvalidity
 		ORDER BY mb.name`, key.Account, mid)
 	if err != nil {
 		return nil, err
@@ -695,9 +699,11 @@ func (s *sqliteStore) MembershipOf(ctx context.Context, key MessageKey) ([]Place
 	for rows.Next() {
 		var pl Placement
 		var kind string
-		if err := rows.Scan(&pl.Mailbox, &kind, &pl.DisplayName, &pl.UIDValidity, &pl.UID); err != nil {
+		var canonical int
+		if err := rows.Scan(&pl.Mailbox, &kind, &pl.DisplayName, &pl.UIDValidity, &pl.UID, &canonical); err != nil {
 			return nil, err
 		}
+		pl.Canonical = canonical == 1
 		pl.Kind = model.MailboxKind(kind)
 		out = append(out, pl)
 	}
@@ -759,10 +765,12 @@ func (s *sqliteStore) MembershipOfMessages(ctx context.Context, account string, 
 		args = append(args, mid)
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT p.mid, p.mailbox, mb.kind, mb.display_name, p.uidvalidity, p.uid
+		SELECT p.mid, p.mailbox, mb.kind, mb.display_name, p.uidvalidity, p.uid, m.canonical
 		FROM placements p
 		JOIN mailboxes mb ON mb.account = p.account AND mb.name = p.mailbox
+		JOIN messages m ON m.account = p.account AND m.mid = p.mid
 		WHERE p.account = ? AND p.mid IN (`+placeholders(len(mids))+`)
+			AND p.uidvalidity = mb.uidvalidity
 		ORDER BY p.mid, mb.name`, args...)
 	if err != nil {
 		return nil, err
@@ -771,10 +779,12 @@ func (s *sqliteStore) MembershipOfMessages(ctx context.Context, account string, 
 	for rows.Next() {
 		var mid, kind string
 		var pl Placement
-		if err := rows.Scan(&mid, &pl.Mailbox, &kind, &pl.DisplayName, &pl.UIDValidity, &pl.UID); err != nil {
+		var canonical int
+		if err := rows.Scan(&mid, &pl.Mailbox, &kind, &pl.DisplayName, &pl.UIDValidity, &pl.UID, &canonical); err != nil {
 			return nil, err
 		}
 		pl.Kind = model.MailboxKind(kind)
+		pl.Canonical = canonical == 1
 		out[mid] = append(out[mid], pl)
 	}
 	return out, rows.Err()

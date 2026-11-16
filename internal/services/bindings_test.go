@@ -134,6 +134,23 @@ func checkNoSecretFields(t *testing.T, where string, typ reflect.Type, seen map[
 	}
 }
 
+// TestActionDTOContract pins the fields the frontend relies on. Adding a field
+// is fine; renaming or dropping one on this list breaks PR #22.
+func TestActionDTOContract(t *testing.T) {
+	result := reflect.TypeOf(ActionResultDTO{})
+	for _, name := range []string{"Applied", "Failed", "AppliedCount", "FailedCount", "BatchID", "AuditIDs", "Code"} {
+		if _, ok := result.FieldByName(name); !ok {
+			t.Errorf("ActionResultDTO lacks %s", name)
+		}
+	}
+	audit := reflect.TypeOf(AuditDTO{})
+	for _, name := range []string{"ID", "TS", "Type", "Params", "Count", "Error", "Undone", "BatchID", "AuditIDs", "Code"} {
+		if _, ok := audit.FieldByName(name); !ok {
+			t.Errorf("AuditDTO lacks %s", name)
+		}
+	}
+}
+
 // wailsCtxMethods take the Wails call context first. It is not visible to
 // JavaScript; it ends when the call is cancelled or the app shuts down.
 var wailsCtxMethods = map[string][]string{

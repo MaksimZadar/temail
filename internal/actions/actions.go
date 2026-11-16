@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/emersion/go-imap/v2"
 
 	"github.com/MaksimZadar/temail/internal/config"
 	"github.com/MaksimZadar/temail/internal/mail"
@@ -77,10 +80,21 @@ type Failure struct {
 	Message string `json:"message"`
 }
 
+// ResultEntry is the audit handle of one message in a Result. Undoable is true
+// only when the message was verified and carries an inverse; an undo row is
+// never undoable again.
+type ResultEntry struct {
+	MID      string `json:"mid"`
+	AuditID  int64  `json:"auditId"`
+	Undoable bool   `json:"undoable"`
+}
+
 // Result is the outcome of one action.
 type Result struct {
-	Applied []string  `json:"applied"`
-	Failed  []Failure `json:"failed"`
+	Applied []string      `json:"applied"`
+	Failed  []Failure     `json:"failed"`
+	BatchID string        `json:"batchId"`
+	Entries []ResultEntry `json:"entries"`
 }
 
 // Inverse is the action that undoes one applied action. An empty Type means the
@@ -98,15 +112,19 @@ type CacheStore interface {
 	ApplyActionUpdates(ctx context.Context, account string, updates []store.ActionUpdate) error
 }
 
-// Writer is the write-capable connection. mail.Writer satisfies it.
+// Writer is the write-capable connection. mail.Writer satisfies it. Every
+// method takes the UIDVALIDITY epoch of the placement it acts on; the writer
+// refuses with mail.ErrEpochChanged when the server's epoch differs, before
+// writing anything.
 type Writer interface {
 	Connect(ctx context.Context, acct config.BridgeAccount, password string) error
-	StoreFlags(ctx context.Context, mailbox string, uids []uint32, add, remove []string) error
-	Move(ctx context.Context, mailbox string, uids []uint32, target string) (mail.CopyUID, error)
-	Copy(ctx context.Context, mailbox string, uids []uint32, target string) (mail.CopyUID, error)
-	ExpungeDeleted(ctx context.Context, mailbox string, uids []uint32) error
-	SearchInternalID(ctx context.Context, mailbox, internalID string) ([]uint32, error)
-	FetchFlags(ctx context.Context, mailbox string, uids []uint32) (map[uint32][]string, error)
+	StoreFlags(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, add, remove []string) error
+	Move(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (mail.CopyUID, error)
+	Copy(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (mail.CopyUID, error)
+	ExpungeDeleted(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) error
+	SearchInternalID(ctx context.Context, mailbox string, uidValidity uint32, internalID string) ([]uint32, error)
+	FetchInternalIDs(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) (map[uint32]string, error)
+	FetchFlags(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) (map[uint32][]string, error)
 	Close() error
 }
 
@@ -138,6 +156,11 @@ type Options struct {
 	Logf func(format string, args ...any)
 	// Now returns the clock; nil means time.Now.
 	Now func() time.Time
+	// Resync is called with the mailboxes whose cache no longer matches the
+	// server (a UIDVALIDITY change, an unknown write outcome, a partial copy).
+	// The service marks them stale and kicks the watcher. nil means no resync
+	// trigger.
+	Resync func(ctx context.Context, mailboxes []string)
 }
 
 // Executor applies actions for one account. All writes are serialised on one
@@ -151,6 +174,7 @@ type Executor struct {
 	mu        sync.Mutex
 	connected bool
 	sleep     func(context.Context, time.Duration) error
+	batchSeq  uint64
 }
 
 // New returns an Executor. The store, writer and audit log are required.
@@ -276,18 +300,59 @@ func (e *Executor) Apply(ctx context.Context, a Action) (Result, error) {
 }
 
 // Undo applies the inverse of audit entry id. It resolves the message's current
-// UID from the cache again, so it works after UIDs changed. The original entry
-// is marked undone only when the inverse is verified.
+// UID from the cache again, so it works after UIDs changed. Before writing it
+// checks that the cache still matches the entry's recorded after-state; if the
+// user changed the message in between, the undo is refused with ErrDiverged.
+// The original entry is marked undone only when the inverse is verified.
 func (e *Executor) Undo(ctx context.Context, id int64) (Result, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
 	entry, err := e.audit.Get(ctx, id)
 	if err != nil {
 		return Result{}, err
 	}
+	return e.undoEntry(ctx, entry, "")
+}
+
+// UndoLast undoes the whole newest action batch that has a verified row. Every
+// message of the batch that carries an inverse is undone; the rows of the undo
+// action itself are recorded in one new batch and are not undoable again.
+func (e *Executor) UndoLast(ctx context.Context) (Result, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	entries, err := e.audit.LastUndoableBatch(ctx, e.opts.Account)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(entries) == 0 {
+		return Result{}, ErrAuditNotFound
+	}
+	batchID := e.newBatchID()
+	res := Result{BatchID: batchID}
+	var firstErr error
+	for _, entry := range entries {
+		if entry.InverseJSON == "" || entry.InverseJSON == "{}" {
+			continue
+		}
+		r, err := e.undoEntry(ctx, entry, batchID)
+		res.Entries = append(res.Entries, r.Entries...)
+		res.Applied = append(res.Applied, r.Applied...)
+		res.Failed = append(res.Failed, r.Failed...)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if len(res.Applied) == 0 && len(res.Failed) == 0 {
+		return res, ErrNotUndoable
+	}
+	return res, firstErr
+}
+
+// undoEntry runs one inverse. A non-empty batchID groups several inverses (from
+// UndoLast) into one audit batch.
+func (e *Executor) undoEntry(ctx context.Context, entry Entry, batchID string) (Result, error) {
 	if entry.Account != e.opts.Account {
-		return Result{}, fmt.Errorf("%w: entry %d", ErrWrongAccount, id)
+		return Result{}, fmt.Errorf("%w: entry %d", ErrWrongAccount, entry.ID)
 	}
 	if entry.Undone {
 		return Result{}, ErrAlreadyUndone
@@ -297,43 +362,68 @@ func (e *Executor) Undo(ctx context.Context, id int64) (Result, error) {
 	}
 	var inv Inverse
 	if err := json.Unmarshal([]byte(entry.InverseJSON), &inv); err != nil {
-		return Result{}, fmt.Errorf("decode inverse of action %d: %w", id, err)
+		return Result{}, fmt.Errorf("decode inverse of action %d: %w", entry.ID, err)
 	}
 	if inv.Type == "" {
 		return Result{}, ErrNotUndoable
 	}
-	inv.Params.UndoOf = id
+	if err := e.checkDiverged(ctx, entry); err != nil {
+		return Result{}, err
+	}
+	inv.Params.UndoOf = entry.ID
 	a := Action{Type: Type(inv.Type), Params: inv.Params, MessageIDs: []string{entry.MID}}
 	if err := Validate(a); err != nil {
 		return Result{}, err
 	}
-	res, err := e.execute(ctx, a, []string{entry.MID}, id)
+	res, err := e.executeBatch(ctx, a, []string{entry.MID}, entry.ID, batchID)
 	if err != nil {
 		return res, err
 	}
 	if len(res.Applied) == 0 {
 		return res, nil
 	}
-	if err := e.audit.MarkUndone(ctx, id, e.opts.Now()); err != nil {
-		return res, fmt.Errorf("mark action %d undone: %w", id, err)
+	if err := e.audit.MarkUndone(ctx, entry.ID, e.opts.Now()); err != nil {
+		return res, fmt.Errorf("mark action %d undone: %w", entry.ID, err)
 	}
 	return res, nil
 }
 
-// UndoLast undoes the newest verified action that is not undone yet.
-func (e *Executor) UndoLast(ctx context.Context) (Result, error) {
-	e.mu.Lock()
-	entry, err := e.audit.LastUndoable(ctx)
-	e.mu.Unlock()
+// checkDiverged compares the message's current cache state with the after-state
+// recorded by the original action. A mismatch means the user changed the
+// message in between (moved it, read it, labelled it), so the inverse would not
+// restore what the audit log promises.
+func (e *Executor) checkDiverged(ctx context.Context, entry Entry) error {
+	mm, err := e.st.MembershipOfMessages(ctx, e.opts.Account, []string{entry.MID})
 	if err != nil {
-		return Result{}, err
+		return fmt.Errorf("read placements from cache: %w", err)
 	}
-	return e.Undo(ctx, entry.ID)
+	fl, err := e.st.FlagsOfMessages(ctx, e.opts.Account, []string{entry.MID})
+	if err != nil {
+		return fmt.Errorf("read flags from cache: %w", err)
+	}
+	var want cachedState
+	if entry.AfterJSON != "" {
+		if err := json.Unmarshal([]byte(entry.AfterJSON), &want); err != nil {
+			return fmt.Errorf("decode after-state of action %d: %w", entry.ID, err)
+		}
+	}
+	cur := cachedState{Mailboxes: mailboxesOf(mm[entry.MID]), Flags: normalizeFlags(fl[entry.MID])}
+	if want.Mailboxes == nil {
+		want.Mailboxes = []string{}
+	}
+	if want.Flags == nil {
+		want.Flags = []string{}
+	}
+	if !sameState(cur, want) {
+		return fmt.Errorf("%w: the message changed after action %d; nothing was undone", ErrDiverged, entry.ID)
+	}
+	return nil
 }
 
-// Recent returns the newest audit entries, newest first.
+// Recent returns the newest audit rows for this account, one row per action
+// batch, newest first.
 func (e *Executor) Recent(ctx context.Context, limit int) ([]Entry, error) {
-	return e.audit.Recent(ctx, limit)
+	return e.audit.Recent(ctx, e.opts.Account, limit)
 }
 
 // normalizeIDs trims blanks and removes duplicates, preserving input order.
@@ -383,10 +473,43 @@ func (e *Executor) drop() {
 	_ = e.w.Close()
 }
 
-// writeErr forgets a broken connection, so the next call reconnects. An auth
-// failure also trips the latch on the connect path; the caller stops the batch.
-func (e *Executor) writeErr(error) {
+// noteWriteErr drops the connection only when the error is not a protocol
+// answer. A NO or BAD leaves the connection usable; transport and cancellation
+// errors do not. The next group reconnects when needed, so one refused group
+// does not fail the rest of the batch with ErrNotConnected.
+func (e *Executor) noteWriteErr(err error) {
+	var ie *imap.Error
+	if errors.As(err, &ie) || errors.Is(err, mail.ErrEpochChanged) ||
+		errors.Is(err, mail.ErrMoveUnsupported) || errors.Is(err, mail.ErrExpungeUnsupported) {
+		return
+	}
 	e.drop()
+}
+
+// requestResync asks the service to re-sync the mailboxes whose cache may be
+// wrong. It runs on a context without cancellation: a cancelled action must
+// still schedule the repair.
+func (e *Executor) requestResync(ctx context.Context, mailboxes []string) {
+	if len(mailboxes) == 0 || e.opts.Resync == nil {
+		return
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(mailboxes))
+	for _, mb := range mailboxes {
+		if mb == "" || seen[mb] {
+			continue
+		}
+		seen[mb] = true
+		out = append(out, mb)
+	}
+	sort.Strings(out)
+	e.opts.Resync(context.WithoutCancel(ctx), out)
+}
+
+// newBatchID names one action batch in the audit log.
+func (e *Executor) newBatchID() string {
+	e.batchSeq++
+	return fmt.Sprintf("%d-%d", e.opts.Now().UnixNano(), e.batchSeq)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

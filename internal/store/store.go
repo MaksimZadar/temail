@@ -109,6 +109,10 @@ type Placement struct {
 	DisplayName string
 	UIDValidity uint32
 	UID         uint32
+	// Canonical reports whether the placement's message is keyed by a real
+	// Proton internal id. A synthetic id cannot be found by an
+	// X-Pm-Internal-Id search.
+	Canonical bool
 }
 
 // FlagUpdate sets the flags of one cached message.
@@ -125,7 +129,10 @@ type ActionUpdate struct {
 	RemoveMailbox string
 	AddMailbox    string
 	AddUID        uint32
-	Flags         []string
+	// AddUIDValidity is the target mailbox epoch the UID was written in. Zero
+	// means use the cached epoch.
+	AddUIDValidity uint32
+	Flags          []string
 }
 
 // MailboxCounts is the cached message and body count of one mailbox.
@@ -162,6 +169,10 @@ type Store interface {
 	// UIDNEXT that the sync saw. The watcher compares that UIDNEXT with the next
 	// STATUS to see new mail.
 	MarkSynced(ctx context.Context, account, mailbox string, at time.Time, uidNext uint32) error
+	// MarkMailboxesStale resets LastSync of the given mailboxes, so the next
+	// reconcile check treats them as changed and syncs them again. It is the
+	// resync trigger after an action could not be confirmed.
+	MarkMailboxesStale(ctx context.Context, account string, mailboxes []string) error
 	// PurgeMailbox deletes the placements of the mailbox, then every message and
 	// body that is left with no placement, and resets its HighestUID, LastSync
 	// and Unseen. The UIDVALIDITY is kept.

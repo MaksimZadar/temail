@@ -135,6 +135,7 @@ func TestActionServiceUndoAndRecent(t *testing.T) {
 		recent: []actions.Entry{{
 			ID: 7, TS: time.Unix(1_700_000_000, 0), Type: "move",
 			ParamsJSON: `{"folder":"Folders/Work"}`, Error: "", Undone: false,
+			Count: 1, Undoable: true, AuditIDs: []int64{7},
 		}},
 	}
 	svc := newActionSvc(t, eng, nil)
@@ -151,8 +152,44 @@ func TestActionServiceUndoAndRecent(t *testing.T) {
 	if recent[0].Params.Folder != "Folders/Work" || recent[0].Count != 1 || recent[0].Undone {
 		t.Fatalf("recent = %+v", recent[0])
 	}
+	if len(recent[0].AuditIDs) != 1 || recent[0].Code != "" {
+		t.Fatalf("recent undo handles = %+v", recent[0])
+	}
 	if _, err := svc.Undo(context.Background(), 0); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("id 0: err = %v", err)
+	}
+}
+
+// TestActionServiceUndoCodes: undo refusals come back as a DTO code with a nil
+// error, so the frontend can render them without treating them as failures.
+func TestActionServiceUndoCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"not undoable", actions.ErrNotUndoable, CodeNotUndoable},
+		{"already undone", actions.ErrAlreadyUndone, CodeAlreadyUndone},
+		{"not found", actions.ErrAuditNotFound, CodeNotFound},
+		{"wrong account", actions.ErrWrongAccount, CodeWrongAccount},
+		{"diverged", actions.ErrDiverged, CodeDiverged},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := &fakeActionEngine{err: tc.err}
+			svc := newActionSvc(t, eng, nil)
+			res, err := svc.Undo(context.Background(), 5)
+			if err != nil {
+				t.Fatalf("error = %v, want nil with a code", err)
+			}
+			if res.Code != tc.code {
+				t.Fatalf("code = %q, want %q", res.Code, tc.code)
+			}
+			res, err = svc.UndoLast(context.Background())
+			if err != nil || res.Code != tc.code {
+				t.Fatalf("UndoLast: code=%q err=%v", res.Code, err)
+			}
+		})
 	}
 }
 
@@ -169,22 +206,26 @@ func TestActionServiceRefusesAfterShutdown(t *testing.T) {
 func TestActionDTOsAreCamelCaseAndSafe(t *testing.T) {
 	out, err := json.Marshal(ActionResultDTO{
 		Applied: []string{"m1"}, Failed: []ActionFailureDTO{{MID: "m2", Mailbox: "INBOX", Message: "x"}},
-		AppliedCount: 1, FailedCount: 1,
+		AppliedCount: 1, FailedCount: 1, BatchID: "b1", AuditIDs: []int64{3}, Code: CodeDiverged,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"appliedCount":1`, `"failedCount":1`, `"message"`} {
+	for _, want := range []string{`"appliedCount":1`, `"failedCount":1`, `"message"`, `"batchId":"b1"`, `"auditIds":[3]`, `"code":"diverged"`} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("JSON %s lacks %s", out, want)
 		}
 	}
-	audit, err := json.Marshal(AuditDTO{ID: 1, TS: time.Unix(0, 0), Type: "star", Count: 1})
+	audit, err := json.Marshal(AuditDTO{
+		ID: 1, TS: time.Unix(0, 0), Type: "star", Count: 2, BatchID: "b1", AuditIDs: []int64{1, 2},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(audit), `"undone":false`) {
-		t.Errorf("audit JSON = %s", audit)
+	for _, want := range []string{`"undone":false`, `"count":2`, `"batchId":"b1"`, `"auditIds":[1,2]`} {
+		if !strings.Contains(string(audit), want) {
+			t.Errorf("audit JSON %s lacks %s", audit, want)
+		}
 	}
 	if strings.Contains(string(audit), "subject") || strings.Contains(string(audit), "body") {
 		t.Errorf("audit DTO carries message content: %s", audit)

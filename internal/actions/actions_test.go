@@ -52,11 +52,12 @@ type seedMsg struct {
 }
 
 type fixture struct {
-	st    store.Store
-	audit *Audit
-	fw    *fakeWriter
-	ex    *Executor
-	ctx   context.Context
+	st     store.Store
+	audit  *Audit
+	fw     *fakeWriter
+	ex     *Executor
+	ctx    context.Context
+	resync []string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -80,6 +81,14 @@ func newFixture(t *testing.T) *fixture {
 	if err := st.UpsertMailboxes(context.Background(), testAccount, boxes); err != nil {
 		t.Fatal(err)
 	}
+	// The seeded mailboxes represent a completed sync: a write to a mailbox
+	// that never synced is refused, and only the unsynced test relies on that.
+	for _, name := range defaultBoxes {
+		if err := st.MarkSynced(context.Background(), testAccount, name, time.Unix(1_700_000_000, 0), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fx := &fixture{st: st, audit: audit, fw: fw, ctx: context.Background()}
 	ex, err := New(st, fw, audit, Options{
 		Account: testAccount,
 		Resolve: func(context.Context) (config.BridgeAccount, string, error) {
@@ -89,12 +98,16 @@ func newFixture(t *testing.T) *fixture {
 		VerifyDelay:   time.Millisecond,
 		VerifyRetries: 2,
 		Logf:          func(string, ...any) {},
+		Resync: func(_ context.Context, mailboxes []string) {
+			fx.resync = append(fx.resync, mailboxes...)
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ex.Close() })
-	return &fixture{st: st, audit: audit, fw: fw, ex: ex, ctx: context.Background()}
+	fx.ex = ex
+	return fx
 }
 
 func (f *fixture) seed(t *testing.T, msgs ...seedMsg) {
@@ -117,6 +130,15 @@ func (f *fixture) seed(t *testing.T, msgs ...seedMsg) {
 	if err := f.st.UpsertHeaders(f.ctx, testAccount, headers); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func (f *fixture) resynced(mailbox string) bool {
+	for _, mb := range f.resync {
+		if mb == mailbox {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fixture) cachePlacements(t *testing.T, mid string) map[string]uint32 {
@@ -264,8 +286,16 @@ func TestArchiveFromAllMailUsesCopyAndIsNotUndoable(t *testing.T) {
 	fx.seed(t, seedMsg{mid: "m1", mailboxes: []string{"All Mail"}})
 
 	res, err := fx.ex.Apply(fx.ctx, Action{Type: Archive, MessageIDs: []string{"m1"}})
-	if err != nil || len(res.Applied) != 1 {
-		t.Fatalf("%+v %v", res, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The copy is confirmed, but the source stays: this is a partial outcome,
+	// never a full success.
+	if len(res.Applied) != 0 || len(res.Failed) != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	if !strings.Contains(res.Failed[0].Message, "archived copy created") {
+		t.Fatalf("failure message = %q", res.Failed[0].Message)
 	}
 	if fx.fw.callCount("COPY All Mail->Archive") != 1 || fx.fw.callCount("MOVE") != 0 {
 		t.Fatalf("calls = %v", fx.fw.callList())
@@ -278,6 +308,9 @@ func TestArchiveFromAllMailUsesCopyAndIsNotUndoable(t *testing.T) {
 		t.Fatalf("All Mail placement was removed: %v", placements)
 	}
 	entries, _ := fx.ex.Recent(fx.ctx, 10)
+	if entries[0].Error == "" || !strings.Contains(entries[0].AfterJSON, "Archive") {
+		t.Fatalf("audit = %+v", entries[0])
+	}
 	if _, err := fx.ex.Undo(fx.ctx, entries[0].ID); !errors.Is(err, ErrNotUndoable) {
 		t.Fatalf("undo error = %v, want ErrNotUndoable", err)
 	}
@@ -289,8 +322,11 @@ func TestArchiveFallsBackToCopyWhenMoveIsRefused(t *testing.T) {
 	fx.fw.refuseMoveToArchive = true
 
 	res, err := fx.ex.Apply(fx.ctx, Action{Type: Archive, MessageIDs: []string{"m1"}})
-	if err != nil || len(res.Applied) != 1 {
-		t.Fatalf("%+v %v", res, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Applied) != 0 || len(res.Failed) != 1 || !strings.Contains(res.Failed[0].Message, "archived copy created") {
+		t.Fatalf("result = %+v", res)
 	}
 	if fx.fw.callCount("COPY INBOX->Archive") != 1 {
 		t.Fatalf("calls = %v", fx.fw.callList())
@@ -312,8 +348,11 @@ func TestMoveToFolderFromAllMailUsesCopy(t *testing.T) {
 	fx := newFixture(t)
 	fx.seed(t, seedMsg{mid: "m1", mailboxes: []string{"All Mail"}})
 	res, err := fx.ex.Apply(fx.ctx, Action{Type: Move, Params: Params{Folder: "Folders/Work"}, MessageIDs: []string{"m1"}})
-	if err != nil || len(res.Applied) != 1 {
-		t.Fatalf("%+v %v", res, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Applied) != 0 || len(res.Failed) != 1 || !strings.Contains(res.Failed[0].Message, "original still in All Mail") {
+		t.Fatalf("result = %+v", res)
 	}
 	if fx.fw.callCount("COPY All Mail->Folders/Work") != 1 {
 		t.Fatalf("calls = %v", fx.fw.callList())
