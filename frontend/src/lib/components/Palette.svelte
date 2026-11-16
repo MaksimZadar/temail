@@ -5,6 +5,7 @@
   import { sync } from "../stores/sync.svelte";
   import { sel as selection } from "../stores/select.svelte";
   import { actions } from "../stores/actions.svelte";
+  import { suggest } from "../stores/suggest.svelte";
   import { layout } from "../stores/layout.svelte";
   import { trapFocus } from "../focus";
   import { pieces, rank, type Cmd } from "../palette-rank";
@@ -22,6 +23,11 @@
       name: "Recent activity",
       aliases: ["undo", "history", "actions", "log"],
       run: () => (ui.overlay = "activity"),
+    },
+    {
+      name: "Suggest labels (AI)",
+      aliases: ["suggest", "ai", "label"],
+      run: () => suggest.trigger(),
     },
     {
       name: "Undo last action",

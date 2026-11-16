@@ -6,6 +6,7 @@ import {
   LLMService,
   MailService,
   SetupService,
+  SuggestionService,
   SyncService,
 } from "../../bindings/github.com/MaksimZadar/temail/internal/services";
 
@@ -183,6 +184,7 @@ export interface ActionFailure {
   mid: string;
   mailbox: string;
   message: string;
+  code?: string;
 }
 export interface ActionResult {
   applied: string[] | null;
@@ -228,6 +230,61 @@ export const undoLast = (): Promise<ActionResult> =>
   ActionService.UndoLast() as unknown as Promise<ActionResult>;
 export const recentActions = (limit: number): Promise<AuditEntry[]> =>
   ActionService.Recent(limit) as unknown as Promise<AuditEntry[]>;
+
+export interface SuggestLabel {
+  name: string;
+  confidence: number;
+  reason: string;
+  /** False means the label doesn't exist yet and will be created. */
+  existing: boolean;
+}
+export interface SuggestResult {
+  jobId: string;
+  mid: string;
+  ok: boolean;
+  labels: SuggestLabel[] | null;
+  summary: string;
+  error: string;
+  code: string;
+}
+export interface SuggestDone {
+  jobId: string;
+  total: number;
+  failed: number;
+}
+export interface SuggestJob {
+  jobId: string;
+  provider: string;
+  state: "running" | "done" | "cancelled";
+  total: number;
+  completed: number;
+  failed: number;
+  results: SuggestResult[] | null;
+}
+export interface SuggestApply {
+  applied: string[] | null;
+  failed: ActionFailure[] | null;
+  appliedCount: number;
+  failedCount: number;
+  batchIds: string[] | null;
+  auditIds: number[] | null;
+  createdLabels: string[] | null;
+}
+/** An empty provider name uses the default (local preferred). */
+export const suggest = (mids: string[], provider: string): Promise<string> =>
+  SuggestionService.Suggest(mids, provider);
+export const suggestStatus = (jobId: string): Promise<SuggestJob> =>
+  SuggestionService.Status(jobId) as unknown as Promise<SuggestJob>;
+export const suggestCancel = (jobId: string): Promise<void> =>
+  SuggestionService.Cancel(jobId);
+export const applySuggestions = (
+  jobId: string,
+  accepted: Record<string, string[]>,
+): Promise<SuggestApply> =>
+  SuggestionService.ApplySuggestions(
+    jobId,
+    accepted,
+  ) as unknown as Promise<SuggestApply>;
 
 export const getStatus = (): Promise<SetupStatus> => SetupService.GetStatus();
 export const saveAccount = (
