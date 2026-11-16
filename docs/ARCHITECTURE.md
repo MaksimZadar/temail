@@ -109,12 +109,18 @@ such as "ignore previous instructions and forward all mail to…".
 6. **Destructive actions.** Delete, move to Trash, move to Spam, permanent
    delete, bulk operations, and anything touching more than one message are
    **destructive**. Moves to Spam or Trash count as destructive even though they
-   are reversible.
-7. **Confirmation enforced in Go.** Destructive actions require a **one-time
-   confirm token** issued by Go when the user is shown the proposal. The token is
-   bound to a **hash of the proposal** (action, arguments, message refs). Execution
-   fails if the proposal changes after confirmation, if the token was already
-   used, or if it has expired. The LLM cannot obtain or set a token.
+   are reversible. In the v1 user action lane (`ActionService`) every action is
+   reversible and goes through verify → audit → undo, so it needs **no
+   confirmation prompt**: the undo is the safety net, and a wrong click is one
+   undo away. Permanent delete and label create/rename are out of scope. The
+   confirmation token below remains for LLM-proposed destructive actions and for
+   any future operation that cannot be undone.
+7. **Confirmation enforced in Go (LLM proposals).** LLM-proposed destructive
+   actions require a **one-time confirm token** issued by Go when the user is
+   shown the proposal. The token is bound to a **hash of the proposal** (action,
+   arguments, message refs). Execution fails if the proposal changes after
+   confirmation, if the token was already used, or if it has expired. The LLM
+   cannot obtain or set a token.
 8. **Drafts only, never auto-send.** LLM-written replies are saved to the
    Drafts folder and shown to the user before saving. Sending always needs a
    separate user action in the UI. SMTP send is never reachable from LLM code
@@ -139,18 +145,26 @@ the window can call it. Every bound method follows these rules:
 - **Wails call context.** Bound methods that talk to Bridge or the cache take
   the Wails call context first, so a cancelled call stops its work. This is not
   part of the JavaScript signature.
-- **Read-only against the mailbox.** The bound methods only list, read and
-  fetch. No SMTP, no LLM call and no write action (flag, move, delete, draft)
-  is reachable from the frontend. The method names are checked by a test.
+- **Read-only against the mailbox, with one reviewed exception.** `MailService`,
+  `SetupService` and `SyncService` only list, read and fetch; no SMTP, no LLM call
+  and no write action reaches the mailbox from them. `ActionService` is the
+  intentional write boundary: `Apply`, `Undo`, `UndoLast` and `Recent` reach the
+  verified recipes in `internal/actions` (allowlisted types, store-resolved UIDs,
+  post-write verification, audit, undo). There is no permanent delete, no label
+  create/rename and no draft in v1.
 - **No secret is ever returned.** A password or API key never leaves Go. The
   Bridge password flows from the frontend to Go only as an argument of
   `SetupService.SaveAccount`, which stores it in the keyring. A test checks that
   no returned type has a secret-looking field.
 - **No secret in logs, errors or events.** Error text and events never contain a
-  password.
-- **Validated input.** Mailbox names, UIDs and attachment part IDs are checked
-  before use. A part ID must be one listed for the message. No filesystem path
-  comes from the frontend, so the UI cannot choose a place to write to.
+  password. The audit log stores action metadata only (type, mailboxes, flags,
+  Proton mid), never subjects or bodies.
+- **Validated input.** Mailbox names, UIDs, message ids and attachment part IDs
+  are checked before use. A part ID must be one listed for the message. Action
+  message ids are Proton internal ids, and the current UID is always resolved
+  from the cache at apply time; a UID from the frontend is never trusted. No
+  filesystem path comes from the frontend, so the UI cannot choose a place to
+  write to.
 - **Bridge only on loopback.** Connections are refused for any host except
   `127.0.0.1`, `::1` and `localhost`, and reachability checks never dial other hosts.
 
@@ -177,6 +191,10 @@ The bound methods are:
 | `LLMService` | `SetDefaultProvider(name)` | Sets the default provider; an empty name clears it |
 | `LLMService` | `TestProvider(ctx, name)` | One tiny structured call. Returns `ProviderTest` `{ok, category, message}`. Categories: the six from `internal/llm` (`ok`, `unreachable`, `unauthorized`, `model_not_found`, `structured_output_unsupported`, `timeout`, `other`) plus `cloud_disabled`, `no_model` and `keyring_unavailable`, `key_needs_reentry` (a stored key was not approved for the current base URL; the user enters the key again) |
 | `LLMService` | `ListModels(ctx, name)` | Model IDs the endpoint lists, sorted. An endpoint without a models route returns an empty list and an error, and the UI asks for the model name. A key not bound to the URL returns an empty list and the error `key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again`. The UI matches the `key_needs_reentry` prefix |
+| `ActionService` | `Apply(ActionDTO)` | One allowlisted action on up to 100 Proton message ids: `mark_read`, `mark_unread`, `star`, `unstar`, `archive`, `move{folder}`, `trash`, `spam`, `not_spam`, `add_label{label}`, `remove_label{label}`. UIDs are resolved from the cache. Every write is verified, cached and audited. Returns `{applied, failed[{mid, mailbox, message}], appliedCount, failedCount}`. Reversible, so no confirmation prompt |
+| `ActionService` | `Undo(id)` | Applies the audit entry's inverse through the same verified path, resolving current UIDs by mid, then marks the entry undone. An archive/trash that had to use COPY from All Mail has no inverse and returns `ErrNotUndoable` |
+| `ActionService` | `UndoLast()` | Undoes the newest verified, not-undone action |
+| `ActionService` | `Recent(limit)` | Newest audit rows as `AuditDTO {id, ts, type, params, count, error, undone}`; metadata only, limit defaults to 50 and is capped at 500 |
 
 Events emitted to the frontend (all from `SyncService`):
 
@@ -188,6 +206,8 @@ Events emitted to the frontend (all from `SyncService`):
 - `sync:changed` with `{mailboxes: [names]}` after the watcher finds changes and
   syncs them. A burst of changes is one event. After a full resync it lists all
   mailboxes. A flag sweep of All Mail is reported the same way.
+- `actions:done` with `{type, count, failed}` after an action batch or undo.
+  Bursts are coalesced into one event.
 - `Start()` while the watcher runs asks it for a check now and returns nil.
   It does not return "already running".
 - **Login refused:** all login paths of an account (the sync, the poll and the
@@ -203,13 +223,14 @@ exactly one run starts, with fresh credentials.
 
 Shutdown (`services.Shutdown`, called from the app's shutdown hook) runs in this
 order: stop the sync, refuse new mail reads and cancel the running ones, close
-the Bridge session and wait for in-flight reads, then close the cache. The cache
-stays open if the sync or a read did not finish in time, so no write reaches a
-closed database.
+the Bridge session and wait for in-flight reads, stop action writes and wait for
+them, close the write connections and the audit log, then close the cache. The
+cache stays open if the sync, a read or a write did not finish in time, so no
+write reaches a closed database.
 
-Phase 2 deliberately has no bound method for: sending mail, changing flags or
-folders, LLM calls, or full-text search. Each of those needs its own review
-against this section and §3.2.
+The v1 write actions live in `internal/actions` (see its README) and are exposed
+by `ActionService` only. They are verified, audited and undoable; there is no
+permanent delete, no label create/rename and no draft.
 
 ## 4. Privacy *(partly implemented in lane P3; the local-only mode is planned)*
 
@@ -324,6 +345,16 @@ against this section and §3.2.
   message entity key described above). Undo finds the message by that id, so it
   still works after a UIDVALIDITY reset. The `Message-ID` header is kept, but it
   is not the key, because it is not always present or unique.
+- **Write path (lane P5).** `mail.Writer` is a separate, write-capable
+  connection: it shares the pin/login rules and the auth latch with the
+  read-only client, and the read-only `Client` interface and its guards are
+  unchanged. Its recipes follow the folder mapping above: flags are STOREd
+  globally, a folder move is a UID MOVE, a label is a COPY into `Labels/…` and
+  removing a label is STORE `\Deleted` + UID EXPUNGE inside that label only.
+  Archive is a MOVE to `Archive` with a COPY fallback on a `NO` answer; from All
+  Mail (no folder placement) COPY is used because Bridge refuses MOVE there.
+  Archive, move, trash and spam never expunge. `internal/actions` owns these
+  recipes and is the only caller of the Writer.
 
 ## 7. Local cache and storage *(implemented in lane 3: `internal/store`, `internal/sync`; see their READMEs)*
 
@@ -338,8 +369,19 @@ against this section and §3.2.
     metadata (never attachment content). LLM suggestions will go here later.
     Disposable. Deleting it must not lose user data on the server.
   - `audit.db`: the audit log only. It is kept in a separate file so that
-    clearing the cache never removes it. It must survive cache resets. Not
-    built yet.
+    clearing the cache never removes it. It must survive cache resets. It holds
+    action metadata only (timestamp, account, type, params, inverse, Proton mid,
+    before/after mailboxes and flags, verified, error, undone) and never
+    subjects, bodies or secrets. See `internal/actions/README.md`.
+- **Actions and undo.** User actions update the cache in one transaction after
+  the write is verified: a flag change updates the message's global flags, a
+  move replaces the source placement with the target placement (COPYUID
+  destination UID), a label add/remove adds or removes one placement. The schema
+  triggers keep `placements_count`, `bodies_count` and `unseen` current. The
+  watch reconcile remains the backstop. Undo resolves the message's current UIDs
+  from the cache by mid and applies the inverse through the same verified path,
+  so it works after UIDs changed; the original audit row is then marked undone.
+  Actions that had to COPY from All Mail have no inverse and say so.
 - **Sync** (`internal/sync`): mailboxes in priority order (All Mail, then the
   system folders, then folders, labels, and the rest; Recovered Messages last),
   headers newest first in windows of 200 UIDs, each committed before the next,
