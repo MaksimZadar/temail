@@ -229,6 +229,10 @@ func TestLLMProviderValidationNewFields(t *testing.T) {
 		{"negative maxContext is refused", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Capabilities: LLMCapabilities{MaxContext: -1}}, true},
 		{"capabilities and enabled are accepted", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Enabled: new(bool),
 			Capabilities: LLMCapabilities{StructuredOutput: true, Tools: true, MaxContext: 32000}}, false},
+		{"thinking none is accepted", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Thinking: ThinkingNone}, false},
+		{"thinking levels are accepted", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Thinking: ThinkingHigh}, false},
+		{"unknown thinking is refused", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Thinking: "max"}, true},
+		{"thinking is case-sensitive", LLMProvider{Name: "x", BaseURL: "https://openrouter.ai/api/v1", Thinking: "None"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

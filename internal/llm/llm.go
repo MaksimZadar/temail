@@ -139,6 +139,9 @@ type Provider struct {
 	Kind         string
 	Enabled      bool
 	Capabilities config.LLMCapabilities
+	// Thinking is the reasoning effort sent with every call. Empty leaves the
+	// provider's default. See config.ThinkingNone and friends.
+	Thinking string
 }
 
 // ProviderFrom returns the Provider for a config entry.
@@ -150,6 +153,7 @@ func ProviderFrom(p config.LLMProvider) Provider {
 		Kind:         p.EffectiveKind(),
 		Enabled:      p.IsEnabled(),
 		Capabilities: p.Capabilities,
+		Thinking:     p.Thinking,
 	}
 }
 
@@ -166,6 +170,10 @@ type Options struct {
 	// DialTimeout bounds connect and TLS handshake. Zero uses
 	// DefaultDialTimeout. It applies even when NoRequestTimeout is set.
 	DialTimeout time.Duration
+	// Thinking is the reasoning effort sent with every call ("none", "low",
+	// "medium" or "high"). Empty sends no reasoning_effort field, which keeps
+	// the provider's default. It overrides Provider.Thinking when set.
+	Thinking string
 }
 
 // normalizeBase makes sure the base URL ends with "/" so that paths join right.

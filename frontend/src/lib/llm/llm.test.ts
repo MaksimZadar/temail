@@ -36,6 +36,7 @@ const provider = (o: Partial<api.LLMProvider> = {}): api.LLMProvider => ({
   kind: "cloud",
   enabled: false,
   capabilities: { structuredOutput: false, tools: false, maxContext: 0 },
+  thinking: "",
   isDefault: false,
   hasKey: true,
   ...o,

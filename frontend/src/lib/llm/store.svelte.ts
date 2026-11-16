@@ -62,6 +62,7 @@ class LLM {
         kind: p.kind,
         enabled,
         capabilities: p.capabilities,
+        thinking: p.thinking,
         apiKey: "", // empty keeps the stored key
       }),
     );

@@ -83,6 +83,30 @@ Built by `newHTTPClient`:
 - `maxContext` is an estimate (4 characters per token). A request over it is
   refused with `ErrTooLarge` before it is sent.
 
+## Thinking control
+
+`Provider.Thinking` (or `Options.Thinking`, which overrides it) is sent as
+`reasoning_effort` on every chat-completions call. The accepted values are
+`none`, `low`, `medium` and `high` (see `config.ThinkingValues`); an empty value
+leaves the field out of the request, so the provider's default applies and
+providers that ignore the field see no change.
+
+- On Ollama's OpenAI-compatible endpoint, `"none"` turns thinking off for a
+  thinking-capable model, and `low`/`medium`/`high` select a level. Models
+  without thinking support ignore the field.
+- Measured on Ollama 0.40.16 with qwen3:8b: default thinking took 11.3 s and 306
+  completion tokens, `"none"` took 0.27 s and 7 tokens and returned no
+  `reasoning` field. `SuggestionService` uses `none` for local suggestion jobs
+  by default (see `internal/suggest/README.md`).
+
+`(*Client).ModelThinking` probes a **local** Ollama model: `POST
+{baseURL without /v1}/api/show` with `{"model": ...}`, no API key, 10 s bound.
+It reads `capabilities` and `thinking`, and maps boolean values to
+`none`/`""` (off/on) and level strings to the config values, dropping values
+config does not accept. A non-local provider or a 404/405/501 answer returns
+`ErrModelCapabilitiesUnsupported`; a 200 without a thinking object reports
+`Supported=false` without an error.
+
 ## Errors and categories
 
 `CategoryOf(err)` gives the category. `Ping` maps failures to:
@@ -98,7 +122,8 @@ Built by `newHTTPClient`:
 | `other` | anything else, including cancellation by the caller |
 
 Sentinel errors (`errors.Is`): `ErrCloudDisabled`, `ErrNoModel`,
-`ErrModelListUnsupported`, `ErrInvalidOutput`, `ErrTooLarge`, `ErrBadSchema`.
+`ErrModelListUnsupported`, `ErrModelCapabilitiesUnsupported`,
+`ErrInvalidOutput`, `ErrTooLarge`, `ErrBadSchema`.
 
 ## Timeouts and cancellation
 
@@ -127,6 +152,12 @@ name.
 chain), the bearer key still being sent, the base-URL rules, redirects not
 followed, oversized replies failing closed (chat and models), the loopback dialer,
 the correction counted against the limit, and the correction text being cut.
+
+`thinking_test.go` covers `reasoning_effort` being sent for `none`/`low`/`high`
+and omitted by default, `Provider.Thinking` applying to calls, an unknown value
+being refused, and the `/api/show` probe: path, no `Authorization`, the model in
+the body, boolean and level values, a missing thinking object, a non-local
+provider, a 404 endpoint and the `/v1` suffix removal.
 
 `llm_test.go` runs against an `httptest` OpenAI-compatible fake. It covers: each
 structured mode (request shape, and the decoded value); retry then success; retry

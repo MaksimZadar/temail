@@ -33,7 +33,7 @@ var wantBound = map[string][]string{
 		"Start", "Status", "Stop",
 	},
 	"LLMService": {
-		"DeleteProvider", "ListModels", "ListProviders", "SaveProvider", "SetDefaultProvider", "TestProvider",
+		"DeleteProvider", "ListModels", "ListProviders", "ModelCapabilities", "SaveProvider", "SetDefaultProvider", "TestProvider",
 	},
 	"ActionService": {
 		"Apply", "Recent", "Undo", "UndoLast",

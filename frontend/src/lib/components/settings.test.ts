@@ -51,6 +51,7 @@ const prov = (o: Partial<api.LLMProvider> = {}): api.LLMProvider => ({
   kind: "local",
   enabled: true,
   capabilities: { structuredOutput: false, tools: false, maxContext: 0 },
+  thinking: "",
   isDefault: false,
   hasKey: false,
   ...o,

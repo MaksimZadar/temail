@@ -175,6 +175,12 @@ func (c *Client) send(ctx context.Context, m mode, name, desc string, schema map
 		Model:    shared.ChatModel(c.p.Model),
 		Messages: msgs,
 	}
+	if c.p.Thinking != "" {
+		// "none" disables thinking on Ollama and is understood by other
+		// OpenAI-compatible endpoints too. The field is omitted when empty, so
+		// the provider's default applies.
+		params.ReasoningEffort = shared.ReasoningEffort(c.p.Thinking)
+	}
 	switch m {
 	case modeNative:
 		js := shared.ResponseFormatJSONSchemaJSONSchemaParam{
