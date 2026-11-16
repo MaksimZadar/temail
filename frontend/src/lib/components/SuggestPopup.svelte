@@ -4,7 +4,13 @@
   import { ui } from "../stores/ui.svelte";
   import { trapFocus } from "../focus";
   import { senderName } from "../mail/format";
-  import { codeText, confidenceText, plural } from "../suggest/text";
+  import {
+    clip,
+    codeText,
+    confidenceText,
+    elapsed,
+    plural,
+  } from "../suggest/text";
 
   let card: HTMLDivElement;
   let list = $state<HTMLElement>();
@@ -187,6 +193,11 @@
         {:else if !r}
           <p class="note" role="status">
             {#if s.running}<i class="spinner" aria-hidden="true"></i>Analysing…
+              <span class="clock">{elapsed(s.elapsed)}</span>
+              {#if !s.cloud}<span class="hint"
+                  >Local models can take a while. You can keep waiting or
+                  cancel.</span
+                >{/if}
             {:else}No result for this email.{/if}
           </p>
         {:else if !r.ok}
@@ -241,10 +252,30 @@
                   <span class="main">
                     <span class="line">
                       <span class="name">{l.name}</span>
-                      {#if !l.existing}<span
+                      {#if l.target === "folder"}<span
+                          class="chip folder"
+                          title="A folder with this name exists. Accepting moves the message to it (undo available)."
+                          ><svg
+                            viewBox="0 0 16 16"
+                            width="12"
+                            height="12"
+                            aria-hidden="true"
+                            ><path
+                              d="M1.5 3.5h4l1.5 1.5h7.5v7.5h-13z"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="1.3"
+                              stroke-linejoin="round"
+                            /></svg
+                          >move to folder</span
+                        >{:else if l.target === "new" || (!l.target && !l.existing)}<span
                           class="new"
-                          title="This label doesn't exist yet. Accepting creates it on Proton."
+                          title="Creates a new label on Proton (cannot be undone)"
                           >new</span
+                        >{:else}<span
+                          class="chip"
+                          title="Adds this existing label to the message"
+                          >add label</span
                         >{/if}
                       <span
                         class="conf"
@@ -274,7 +305,12 @@
             <p>Some emails couldn't be labelled:</p>
             <ul>
               {#each s.applyFailures as f (f.mid)}
-                <li><b>{s.subjectOf(f.mid)}</b>: {f.text}</li>
+                <li>
+                  <b>{s.subjectOf(f.mid)}</b>: {f.text}
+                  {#if f.detail}<span class="detail" title={f.detail}
+                      >{clip(f.detail)}</span
+                    >{/if}
+                </li>
               {/each}
             </ul>
           </div>
@@ -535,6 +571,31 @@
     color: var(--accent);
     background: var(--accent-soft);
     border-radius: 999px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0 0.4rem;
+    font-size: 0.7rem;
+    color: var(--fg-dim);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+  .chip.folder {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .clock {
+    font-variant-numeric: tabular-nums;
+  }
+  .hint {
+    font-size: var(--fs-small);
+  }
+  .detail {
+    display: block;
+    color: var(--fg-dim);
+    overflow-wrap: anywhere;
   }
   .conf {
     display: inline-flex;

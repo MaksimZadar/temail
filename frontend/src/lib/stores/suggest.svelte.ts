@@ -20,6 +20,8 @@ export interface Target {
 export interface ApplyFailure {
   mid: string;
   text: string;
+  /** Server text for this email, if any (can be long). */
+  detail: string;
 }
 
 /** Pick the provider the way Go does, for display only. */
@@ -54,6 +56,9 @@ class Suggest {
   applying = $state(false);
   applyError = $state("");
   applyFailures = $state<ApplyFailure[]>([]);
+  /** Seconds since the job started (ticks while it runs). */
+  elapsed = $state(0);
+  private timer: ReturnType<typeof setInterval> | undefined;
 
   private gen = 0;
   private offs: (() => void)[] = [];
@@ -117,6 +122,7 @@ class Suggest {
     const gen = ++this.gen;
     this.reset();
     this.open = true;
+    this.startClock();
     this.targets = headers.map((h) => ({
       mid: h.internalId as string,
       header: h,
@@ -194,6 +200,7 @@ class Suggest {
   }
 
   private fail(code: string, text: string): void {
+    this.stopClock();
     this.fatal = { code, text };
     this.phase = "failed";
     this.unsubscribe();
@@ -213,7 +220,21 @@ class Suggest {
     }
   }
 
+  private startClock(): void {
+    this.stopClock();
+    this.elapsed = 0;
+    const t0 = Date.now();
+    this.timer = setInterval(() => {
+      this.elapsed = Math.floor((Date.now() - t0) / 1000);
+    }, 1000);
+  }
+  private stopClock(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
   private finish(d: api.SuggestDone): void {
+    this.stopClock();
     this.done = d;
     if (this.phase !== "cancelled") this.phase = "done";
     this.unsubscribe();
@@ -293,6 +314,7 @@ class Suggest {
     const id = this.jobId;
     const was = this.running;
     this.gen++;
+    this.stopClock();
     this.unsubscribe();
     if (was && id) void api.suggestCancel(id).catch(() => {});
     this.phase = "cancelled";
@@ -321,7 +343,24 @@ class Suggest {
     this.applying = false;
     const ok = new Set(res.applied ?? []);
     const failed = res.failed ?? [];
-    const labels = [...ok].reduce((n, m) => n + (accepted[m]?.length ?? 0), 0);
+    // Split what was applied into label adds and folder moves.
+    let labels = 0;
+    let moved = 0;
+    const folders: string[] = [];
+    for (const m of ok) {
+      const byName = new Map(
+        (this.results[m]?.labels ?? []).map((l) => [labelKey(l.name), l]),
+      );
+      let movedHere = false;
+      for (const n of accepted[m] ?? []) {
+        const l = byName.get(labelKey(n));
+        if (l?.target === "folder") {
+          movedHere = true;
+          if (!folders.includes(l.name)) folders.push(l.name);
+        } else labels++;
+      }
+      if (movedHere) moved++;
+    }
     const auditIds = res.auditIds ?? [];
     const created = res.createdLabels?.length ?? 0;
     if (ok.size > 0) {
@@ -329,7 +368,18 @@ class Suggest {
         ...this.applied,
         ...Object.fromEntries([...ok].map((m) => [m, true as const])),
       };
-      let text = `Applied ${plural(labels, "label")} to ${plural(ok.size, "message")}`;
+      const parts: string[] = [];
+      if (moved > 0)
+        parts.push(
+          `Moved ${plural(moved, "message")} to ${folders.join(", ")}`,
+        );
+      if (labels > 0)
+        parts.push(
+          moved > 0
+            ? `added ${plural(labels, "label")}`
+            : `Added ${plural(labels, "label")} to ${plural(ok.size, "message")}`,
+        );
+      let text = parts.join(", ");
       if (created > 0) text += ` (${plural(created, "new label")} created)`;
       actions.showToast(
         {
@@ -353,6 +403,7 @@ class Suggest {
     this.applyFailures = failed.map((f) => ({
       mid: f.mid,
       text: codeText(f.code ?? "", f.message),
+      detail: f.message ?? "",
     }));
   }
 

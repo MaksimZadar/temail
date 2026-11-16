@@ -11,6 +11,7 @@ const CODES: Record<string, string> = {
   invalid_output: "The AI gave an answer temail couldn't use.",
   cache_error: "Couldn't read this email from the local cache.",
   create_failed: "Couldn't create the new label on Proton.",
+  move_failed: "Couldn't move this email to the folder.",
   apply_failed: "Couldn't add the label to this email.",
   rejected: "This label isn't one the AI suggested.",
   cloud_disabled: "This cloud provider is turned off. Turn it on in Settings.",
@@ -24,7 +25,17 @@ export function codeText(code: string, fallback = ""): string {
 /** Suggestions are pre-ticked when sure enough and the label already exists. */
 export const PRETICK = 0.6;
 export const defaultTick = (l: SuggestLabel): boolean =>
-  l.existing && l.confidence >= PRETICK;
+  (l.target ?? (l.existing ? "label" : "new")) !== "new" &&
+  l.confidence >= PRETICK;
+
+/** Shorten long server text for the list; the full text goes in a tooltip. */
+export const clip = (s: string, n = 120): string =>
+  s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s;
+
+export function elapsed(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
 
 export const labelKey = (name: string): string => name.toLowerCase();
 
