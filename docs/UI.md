@@ -1,6 +1,6 @@
-# temail UI design (phase 2)
+# temail UI design (phase 2, actions added in phase 4)
 
-Status: accepted direction. PR 1 (shell and setup wizard) and PR 2 (mailbox view) implemented. Scope: first-run setup and read-only browsing.
+Status: accepted direction. Setup wizard, mailbox view and mail actions (section 10) implemented.
 
 **Principle.** temail is a modern desktop app first. Everything works with the mouse alone: visible buttons, clickable rows and folders, hover and focus states, tooltips. Vim-style keys are an optional accelerator layered on top, never required. It must not look like a terminal: no monospace UI, no mode line, no key-hint bar as the main interface.
 
@@ -45,9 +45,11 @@ Dense but friendly (think Linear, Thunderbird's compact view), quiet, content fi
 
 Keys are ignored while typing in any input, during IME composition, and for Ctrl/Alt/Meta combinations the browser or OS owns (only Ctrl-d/u/f/b are ours). `Esc` leaves a field. Counts (`5j`) and sequences (`g i`) wait with no timeout; `Esc`, an invalid key or a click elsewhere cancels them. The single table in `frontend/src/lib/keys/keymap.ts` drives the handler, the `?` overlay and the which-key popover.
 
-**Active** (read-only): `j`/`k` move, `gg`/`G` first/last (`12G` = line 12), `Ctrl-d`/`Ctrl-u` half page, `Ctrl-f`/`Ctrl-b` page, `h`/`l` pane focus (`Tab` keeps its normal meaning, so keyboard users are never trapped), `b` show or hide folders, `Enter`/`o` open, `[`/`]` previous/next message, `g i/s/d/t/a/j` go to Inbox/Sent/Drafts/Trash/Archive/Spam, `g l` pick any folder or label, `g r` refresh, `g ,` Settings, `g h` plain text/HTML, `g x` links in this message, `y` copy sender, `/` filter the loaded messages of the folder by subject or sender (Esc clears), `:` command palette (includes "Go to <folder>"; `g l` opens it that way), `?` shortcuts. In the setup wizard: `Enter` continues, `Esc` goes back, `?` and `:` work.
+**Active** (read-only): `j`/`k` move, `gg`/`G` first/last (`12G` = line 12), `Ctrl-d`/`Ctrl-u` half page, `Ctrl-f`/`Ctrl-b` page, `h`/`l` pane focus (`Tab` keeps its normal meaning, so keyboard users are never trapped), `b` show or hide folders, `Enter`/`o` open, `[`/`]` previous/next message, `g i/s/d/t/a/j` go to Inbox/Sent/Drafts/Trash/Archive/Spam, `g l` pick any folder or label, `g r` refresh, `g ,` Settings, `g h` plain text/HTML, `g x` links in this message, `y` copy sender, `/` filter the loaded messages of the folder by subject or sender (Esc clears), `g u` recent activity, `:` command palette (includes "Go to <folder>", "Recent activity", "Undo last action"; `g l` opens it that way), `?` shortcuts. In the setup wizard: `Enter` continues, `Esc` goes back, `?` and `:` work.
 
-**Reserved for later** (the keys stay free; `i` load remote images is also reserved, see section 5 and are listed greyed in `?`; pressing one shows "Not available yet"): `e` archive, `#` trash, `!` spam, `m` move, `;` label (not `l`, which is pane focus), `s` star, `U` mark unread, `x` select, `u` undo (phase 4); `a` accept suggestion, `S` suggestion panel (phase 3); `r`/`R` reply drafts (phase 5). Destructive actions will always ask for confirmation. Lowercase acts on the current item; uppercase is the broader variant. Remapping in a config file comes later.
+**Actions** (phase 4, see section 10): `e` archive, `d` trash (`#` is an alias), `!` spam (not spam when you are in Spam), `m` move to a folder, `;` labels, `u` toggle read, `s` toggle star, `z` undo, `x` select a row, `v` select a range, `Esc` clears the selection, `g u` recent activity. `U` is unbound. Counts are ignored on actions (the hint says "Counts don't apply to actions").
+
+**Reserved for later** (the keys stay free; `i` load remote images is also reserved, see section 5, and is listed greyed in `?`; pressing one shows "Not available yet"): `a` accept suggestion, `S` suggestion panel (phase 3); `r`/`R` reply drafts (phase 5). Lowercase acts on the current item; uppercase is the broader variant. Remapping in a config file comes later.
 
 **Overlays.** `Esc` closes every overlay (shortcuts, commands, sync panel). `q` also closes the shortcuts and sync panels (never in the commands field, where it is just a letter), and `?` closes the shortcuts again. Overlays keep `Tab` inside them and give focus back when they close. The command palette (`:`) shows at most 5 results at a time, filtered as you type (name, aliases, and loose in-order matches, best first, matched letters highlighted); arrows or `Ctrl-n`/`Ctrl-p` move and scroll the window, `Enter` runs, a click works, and it says "No matching commands" when nothing fits.
 
@@ -102,6 +104,20 @@ Stores are classes with `$state` fields. Tests (vitest, jsdom, Testing Library) 
 - **Live changes (implemented).** `sync:changed` is coalesced for 250 ms. It refreshes the counts, and the head of the open list only if that mailbox changed. The cursor stays on its message (or on its neighbour if that one was removed), the scroll position is kept, messages that disappeared are removed, and an open message that left the folder stays on screen with "This message is no longer in this folder." The open message's folder and label chips are re-read when they may have changed.
 
 Message headers carry `mailboxes` (the folder or system mailbox and labels the message is in). The message pane shows them as chips under the header (a neutral chip for the folder, violet-tinted chips for labels, each with a tooltip); clicking one jumps to it like a `g` jump. The list shows up to two compact label chips per row when the list is at least 520 px wide, never repeating the label you are viewing.
+
+## 10. Mail actions (implemented)
+
+Actions call `ActionService.Apply` with stable message ids (the `internalId` of the message header, never a UID). Cache, folder membership and counters are updated in Go; the UI re-reads the list afterwards and keeps `actions:done` (coalesced, 250 ms) as a refresh hint next to `sync:changed`. The cursor stays on its message key through every refresh.
+
+- **What an action targets.** The selection if there is one; otherwise the open message when the message pane is focused; otherwise the cursor row (list focused). Messages without an id yet are skipped with a hint.
+- **Selection.** `x` toggles the cursor row, `v` starts a range that follows the cursor (like vim visual mode; `v` or `x` ends it and keeps it), `Esc` clears. Ctrl-click toggles a row and Shift-click selects from the cursor row. Selected rows get a violet tint, a 2 px violet bar and a check mark; the toolbar shows "N selected" with a clear button. The selection belongs to the folder it was made in.
+- **No confirmation prompts.** All actions are reversible, so there is an undo toast instead. Nothing is ever deleted for good (trash only).
+- **Batches.** Go takes at most 100 messages per call. Bigger batches are sent in chunks of 100, one after another, and the results are merged into one toast.
+- **While it runs.** The affected rows show a small spinner and dim; the list is re-read from the store when Go answers (no optimistic changes). After archive, trash, spam, not spam and move, the cursor goes to the next message (the previous one at the end of the list); if you were reading, the next message opens.
+- **Move** (`m`) opens a picker in the command-palette style: 5 rows, filtered as you type, listing `Folders/*` plus Archive, Trash and Spam (those use their own action types). **Labels** (`;`) opens a similar picker with checkboxes; labels the targets already have are ticked, labels on only some are shown as "mixed". Apply sends only the differences as `add_label` / `remove_label`.
+- **Toast.** "Archived 3 messages · Undo z" for 8 s (paused while hovered or focused). The Undo button is focusable and `z` does the same: it calls `UndoLast`. An error toast stays 16 s: "2 of 5 failed: <reason>" (the most common reason, and how many others). When Go answers that an action has no inverse (for example archive that had to copy from All Mail) the toast says "This action can't be undone".
+- **Activity.** `g u`, the toolbar clock button or the palette command "Recent activity" lists the last 50 actions with time, count, an "undone" mark and an Undo button per entry (`Undo(id)`).
+- **Mouse.** Toolbar buttons (archive, trash, spam, move, labels, read, star, undo, activity), quick actions that appear on a row on hover or when it is the cursor row, and a right-click menu on rows. All have tooltips with the key. A quick action on a selected row applies to the whole selection.
 
 ## 9. Settings and AI providers (implemented)
 

@@ -2,6 +2,7 @@
 // replace this whole module, so nothing else imports the bindings directly.
 import { Browser, Events } from "@wailsio/runtime";
 import {
+  ActionService,
   LLMService,
   MailService,
   SetupService,
@@ -160,6 +161,57 @@ export interface ProgressEvent {
   bodiesDone: number;
   bodiesTotal: number;
 }
+
+export type ActionType =
+  | "mark_read"
+  | "mark_unread"
+  | "star"
+  | "unstar"
+  | "archive"
+  | "move"
+  | "trash"
+  | "spam"
+  | "not_spam"
+  | "add_label"
+  | "remove_label";
+export interface ActionIn {
+  type: ActionType;
+  params: { folder?: string; label?: string };
+  messageIds: string[];
+}
+export interface ActionFailure {
+  mid: string;
+  mailbox: string;
+  message: string;
+}
+export interface ActionResult {
+  applied: string[] | null;
+  failed: ActionFailure[] | null;
+  appliedCount: number;
+  failedCount: number;
+}
+export interface AuditEntry {
+  id: number;
+  ts: string;
+  type: string;
+  params: { folder?: string; label?: string };
+  count: number;
+  error: string;
+  undone: boolean;
+}
+export interface ActionsDone {
+  type: string;
+  count: number;
+  failed: number;
+}
+export const applyAction = (a: ActionIn): Promise<ActionResult> =>
+  ActionService.Apply(a as never) as unknown as Promise<ActionResult>;
+export const undoAction = (id: number): Promise<ActionResult> =>
+  ActionService.Undo(id) as unknown as Promise<ActionResult>;
+export const undoLast = (): Promise<ActionResult> =>
+  ActionService.UndoLast() as unknown as Promise<ActionResult>;
+export const recentActions = (limit: number): Promise<AuditEntry[]> =>
+  ActionService.Recent(limit) as unknown as Promise<AuditEntry[]>;
 
 export const getStatus = (): Promise<SetupStatus> => SetupService.GetStatus();
 export const saveAccount = (

@@ -3,6 +3,8 @@
   import { ui } from "../stores/ui.svelte";
   import { mail } from "../stores/mail.svelte";
   import { sync } from "../stores/sync.svelte";
+  import { sel as selection } from "../stores/select.svelte";
+  import { actions } from "../stores/actions.svelte";
   import { layout } from "../stores/layout.svelte";
   import { trapFocus } from "../focus";
   import { pieces, rank, type Cmd } from "../palette-rank";
@@ -15,6 +17,21 @@
       name: "Sync now",
       aliases: ["refresh", "fetch", "reload", "check mail", "sync"],
       run: () => void sync.syncNow(),
+    },
+    {
+      name: "Recent activity",
+      aliases: ["undo", "history", "actions", "log"],
+      run: () => (ui.overlay = "activity"),
+    },
+    {
+      name: "Undo last action",
+      aliases: ["undo", "revert"],
+      run: () => void actions.undoLast(),
+    },
+    {
+      name: "Select all in this folder",
+      aliases: ["select", "all"],
+      run: () => selection.selectAll(),
     },
     {
       name: "Settings",

@@ -1,6 +1,7 @@
 import type { Binding, Context } from "../keys/keymap";
 
-export type Overlay = "none" | "help" | "palette" | "sync";
+export type Overlay =
+  "none" | "help" | "palette" | "sync" | "move" | "label" | "activity";
 export type Theme = "auto" | "light" | "dark";
 
 class UI {

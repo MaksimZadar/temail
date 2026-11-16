@@ -6,6 +6,8 @@
   import { sync } from "../stores/sync.svelte";
   import { cache } from "../stores/cache.svelte";
   import { ui } from "../stores/ui.svelte";
+  import { sel } from "../stores/select.svelte";
+  import { actions } from "../stores/actions.svelte";
   import { findByKind } from "../mail/folders";
   import type { MailboxKind } from "../api";
   import Toolbar from "./Toolbar.svelte";
@@ -81,6 +83,17 @@
     layout.step(-1);
   }
 
+  /** Actions ignore count prefixes: "5e" is just "e", with a hint. */
+  const act = (count: number | undefined, fn: () => void): void => {
+    if (count !== undefined) ui.flash("Counts don't apply to actions");
+    fn();
+  };
+  const withCursor = (fn: () => void): void => {
+    // Selecting works in the list; from the folder pane there is no row.
+    if (layout.focus === "folders") return ui.flash("Pick a message first");
+    fn();
+  };
+
   onMount(() => {
     void sync.start();
     cache.start();
@@ -109,6 +122,34 @@
       api.onEvent<{ mailboxes: string[] }>("sync:changed", (e) =>
         mail.noteChanged(e?.mailboxes),
       ),
+      api.onEvent("actions:done", () => actions.noteDone()),
+      ui.register("msg.archive", (c) =>
+        act(c, () => void actions.run("archive")),
+      ),
+      ui.register("msg.trash", (c) => act(c, () => void actions.run("trash"))),
+      ui.register("msg.spam", (c) =>
+        act(
+          c,
+          () =>
+            void actions.run(
+              mail.folder?.kind === "spam" ? "not_spam" : "spam",
+            ),
+        ),
+      ),
+      ui.register("msg.move", (c) => act(c, () => actions.openPicker("move"))),
+      ui.register("msg.label", (c) =>
+        act(c, () => actions.openPicker("label")),
+      ),
+      ui.register("msg.read", (c) => act(c, () => void actions.toggleRead())),
+      ui.register("msg.star", (c) => act(c, () => void actions.toggleStar())),
+      ui.register("msg.undo", (c) => act(c, () => void actions.undoLast())),
+      ui.register("select.toggle", (c) =>
+        act(c, () => withCursor(() => sel.toggle())),
+      ),
+      ui.register("select.visual", (c) =>
+        act(c, () => withCursor(() => sel.visualToggle())),
+      ),
+      ui.register("activity.open", () => (ui.overlay = "activity")),
       ui.register("list.down", (c) => move(1, c)),
       ui.register("list.up", (c) => move(-1, c)),
       ui.register("list.first", (c) => jump("first", c)),
@@ -148,7 +189,8 @@
       }),
       ui.register("back", () => {
         if (view?.closeLinks()) return;
-        if (mail.filter) mail.setFilter("");
+        if (sel.count > 0) sel.clear();
+        else if (mail.filter) mail.setFilter("");
         else if (layout.focus !== "list") layout.setFocus("list");
       }),
     ];
@@ -160,6 +202,7 @@
       window.removeEventListener("resize", onResize);
       offs.forEach((f) => f());
       sync.stop();
+      actions.stop();
       cache.stop();
     };
   });

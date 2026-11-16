@@ -10,6 +10,9 @@
   import HelpOverlay from "./lib/components/HelpOverlay.svelte";
   import Palette from "./lib/components/Palette.svelte";
   import SyncPanel from "./lib/components/SyncPanel.svelte";
+  import Picker from "./lib/components/Picker.svelte";
+  import Activity from "./lib/components/Activity.svelte";
+  import Toast from "./lib/components/Toast.svelte";
   import WhichKey from "./lib/components/WhichKey.svelte";
 
   $effect(() => {
@@ -83,6 +86,10 @@
 {#if ui.overlay === "help"}<HelpOverlay />{/if}
 {#if ui.overlay === "palette"}<Palette />{/if}
 {#if ui.overlay === "sync"}<SyncPanel />{/if}
+{#if ui.overlay === "move"}<Picker mode="move" />{/if}
+{#if ui.overlay === "label"}<Picker mode="label" />{/if}
+{#if ui.overlay === "activity"}<Activity />{/if}
+<Toast />
 <WhichKey />
 
 <style>
