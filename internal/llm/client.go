@@ -49,19 +49,26 @@ func NewClient(p Provider, apiKey string, opts Options) (*Client, error) {
 	if !validBase(p.BaseURL) {
 		return nil, fmt.Errorf("llm: provider %q: baseURL must be an http(s) URL with a host", p.Name)
 	}
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = DefaultTimeout
+	dialTimeout := opts.DialTimeout
+	if dialTimeout <= 0 {
+		dialTimeout = DefaultDialTimeout
 	}
-	sdk := openai.NewClient(
+	sdkOpts := []option.RequestOption{
 		option.WithBaseURL(normalizeBase(p.BaseURL)),
 		option.WithAPIKey(apiKey),
-		option.WithHTTPClient(newHTTPClient(p.Kind, timeout)),
+		option.WithHTTPClient(newHTTPClient(p.Kind, dialTimeout)),
 		// Retries are the caller's decision (one structured-output retry), not
 		// the SDK's: a retried request could be sent to the provider twice.
 		option.WithMaxRetries(0),
-		option.WithRequestTimeout(timeout),
-	)
+	}
+	if !opts.NoRequestTimeout {
+		timeout := opts.Timeout
+		if timeout <= 0 {
+			timeout = DefaultTimeout
+		}
+		sdkOpts = append(sdkOpts, option.WithRequestTimeout(timeout))
+	}
+	sdk := openai.NewClient(sdkOpts...)
 	return &Client{p: p, sdk: sdk}, nil
 }
 
@@ -99,12 +106,16 @@ func wrapCall(err error) *Error {
 //   - Response bodies are capped (see completionsMaxBody, modelsMaxBody).
 //   - A local provider dials loopback addresses only, and never through a
 //     proxy. A cloud provider uses the default transport.
-func newHTTPClient(kind string, timeout time.Duration) *http.Client {
+//   - Connect and TLS handshake are bounded independently of any request
+//     timeout, so a dead endpoint fails quickly even when the reply itself has
+//     no deadline.
+func newHTTPClient(kind string, dialTimeout time.Duration) *http.Client {
 	var base *http.Transport
 	if kind == config.KindLocal {
 		base = &http.Transport{
-			Proxy:       nil,
-			DialContext: loopbackOnlyDial(&net.Dialer{Timeout: timeout}),
+			Proxy:               nil,
+			DialContext:         loopbackOnlyDial(&net.Dialer{Timeout: dialTimeout}),
+			TLSHandshakeTimeout: dialTimeout,
 		}
 	} else {
 		base = http.DefaultTransport.(*http.Transport).Clone()

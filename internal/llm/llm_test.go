@@ -454,6 +454,71 @@ func TestCallerCancelIsNotATimeoutCategory(t *testing.T) {
 	}
 }
 
+func TestNoRequestTimeoutAllowsSlowLocalReply(t *testing.T) {
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ map[string]any, _ int) {
+		time.Sleep(200 * time.Millisecond)
+		contentReply(w, `{"label":"slow"}`)
+	})
+	// Timeout would end this call at 20 ms if the request timeout were set.
+	c := newTestClient(t, f.srv.URL, config.LLMCapabilities{StructuredOutput: true},
+		Options{Timeout: 20 * time.Millisecond, NoRequestTimeout: true})
+	start := time.Now()
+	got, err := Complete(context.Background(), c, req(), labelSchemaFor())
+	if err != nil {
+		t.Fatalf("slow local reply = %v", err)
+	}
+	if got.Label != "slow" {
+		t.Fatalf("label = %q", got.Label)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("call returned after %v; the server reply was not awaited", elapsed)
+	}
+}
+
+func TestNoRequestTimeoutStillHonoursCallerCancel(t *testing.T) {
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, _ map[string]any, _ int) {
+		<-r.Context().Done()
+	})
+	c := newTestClient(t, f.srv.URL, config.LLMCapabilities{StructuredOutput: true},
+		Options{NoRequestTimeout: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
+	_, err := Complete(ctx, c, req(), labelSchemaFor())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestNoRequestTimeoutStillBoundsTLSHandshake(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	// Accept TCP but never answer the TLS handshake.
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(io.Discard, c)
+			}(conn)
+		}
+	}()
+	c := newTestClient(t, "https://"+l.Addr().String(), config.LLMCapabilities{},
+		Options{NoRequestTimeout: true, DialTimeout: 100 * time.Millisecond})
+	start := time.Now()
+	if err := c.Ping(context.Background()); err == nil {
+		t.Fatal("a stalled TLS handshake should fail")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("TLS handshake was not bounded: %v", elapsed)
+	}
+}
+
 func TestKeyIsSentButNeverInErrors(t *testing.T) {
 	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ map[string]any, _ int) {
 		// A hostile server echoes the key and the request in its error body.

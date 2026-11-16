@@ -411,6 +411,14 @@ func (s *LLMService) ListModels(ctx context.Context, name string) ([]string, err
 // A key that is not bound to the current base URL is refused with
 // ErrKeyNeedsReentry.
 func (s *LLMService) clientFor(name string) (*llm.Client, error) {
+	return s.clientForTimeout(name, llmCallTimeout)
+}
+
+// clientForTimeout builds an llm client with a specific per-request timeout. A
+// timeout of zero or less disables the request timeout: the caller's context is
+// then the only bound on the reply, which is what a slow local model needs.
+// Connect and TLS handshake stay bounded either way.
+func (s *LLMService) clientForTimeout(name string, timeout time.Duration) (*llm.Client, error) {
 	s.cfgMu.Lock()
 	cfg, err := s.loadConfig()
 	if err != nil {
@@ -436,7 +444,11 @@ func (s *LLMService) clientFor(name string) (*llm.Client, error) {
 	} else {
 		key = "" // no key: a local endpoint such as Ollama
 	}
-	client, err := llm.NewClient(llm.ProviderFrom(prov), key, llm.Options{Timeout: llmCallTimeout})
+	opts := llm.Options{Timeout: timeout}
+	if timeout <= 0 {
+		opts.NoRequestTimeout = true
+	}
+	client, err := llm.NewClient(llm.ProviderFrom(prov), key, opts)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}

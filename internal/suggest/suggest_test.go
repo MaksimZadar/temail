@@ -238,6 +238,27 @@ func TestNormalizeCapsLabelsAndNewNames(t *testing.T) {
 	}
 }
 
+func TestNormalizeWithFoldersDoesNotCountFolderAsNew(t *testing.T) {
+	raw := Suggestion{Labels: []Label{
+		{Name: "projects", Confidence: 0.9},
+		{Name: "New A", Confidence: 0.8},
+		{Name: "New B", Confidence: 0.7},
+		{Name: "New C", Confidence: 0.6},
+	}}
+	got := NormalizeWithFolders(raw, []string{"Work"}, []string{"Projects"})
+	if len(got.Labels) != 3 {
+		t.Fatalf("labels = %+v, want folder target + %d new", got.Labels, MaxNewLabels)
+	}
+	if got.Labels[0].Name != "Projects" || got.Labels[0].Existing {
+		t.Errorf("folder target = %+v, want canonical folder name and Existing false", got.Labels[0])
+	}
+	for _, l := range got.Labels {
+		if l.Name == "New C" {
+			t.Errorf("third new label survived: %+v", got.Labels)
+		}
+	}
+}
+
 func TestNormalizeRespectsLabelCap(t *testing.T) {
 	existing := make([]string, 0, MaxLabels+4)
 	labels := make([]Label, 0, MaxLabels+4)

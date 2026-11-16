@@ -107,6 +107,13 @@ ends the call sooner, and a context deadline is reported as `timeout`. A
 cancelled context returns `context.Canceled` in the chain, and its category is
 `other`.
 
+`Options.NoRequestTimeout` removes the per-request bound, so only the caller's
+context limits the reply. Suggestion jobs use it for `local` providers: an
+Ollama model can take minutes, and the job's Cancel button is the bound. The
+connect and TLS handshake steps are still bounded by `Options.DialTimeout`
+(default 10 s), so a dead endpoint fails fast even with no request timeout.
+Response body caps are unchanged in both modes.
+
 ## ListModels
 
 `GET {base}/models`, paged with the SDK's auto-pager. The result is sorted and

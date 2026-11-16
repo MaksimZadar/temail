@@ -319,6 +319,32 @@ func (e *Executor) CreateLabel(ctx context.Context, name string) error {
 	return nil
 }
 
+// ServerRefusalMessage returns the server's own NO/BAD text from err, reduced
+// to one line and capped, for display. It returns "" when err is not an IMAP
+// status refusal. Only the server's text is used: no local path, request body
+// or credential that temail built is included. Control characters are removed
+// so the text cannot break a UI line.
+func ServerRefusalMessage(err error) string {
+	var ie *imap.Error
+	if !errors.As(err, &ie) {
+		return ""
+	}
+	text := strings.TrimSpace(strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, ie.Text)), " "))
+	if text == "" {
+		return ""
+	}
+	const max = 240
+	if r := []rune(text); len(r) > max {
+		return string(r[:max-3]) + "..."
+	}
+	return text
+}
+
 // validNewLabel applies the write-boundary rules for a new label name. The
 // suggestion layer applies the same rules; this is the second check.
 func validNewLabel(name string) error {

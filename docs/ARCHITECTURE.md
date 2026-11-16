@@ -66,6 +66,11 @@ Rules:
   not the SDK error. The SDK error holds the request, including the bearer key,
   and the response body. Its text is fixed, and `%+v` and `%#v` print the same
   text.
+- **Timeouts:** a cloud request is bounded (30 s for provider tests and model
+  listing, 120 s per email in a suggestion job). A local provider gets no
+  request timeout, because a local model can be very slow; the suggestion job's
+  Cancel button ends the call. Connect and TLS handshake stay bounded (10 s) in
+  both modes, so a dead endpoint fails fast.
 - **Status:** the client, the config fields, the `LLMService` bound methods and
   the label-suggestion feature (`internal/suggest`, `SuggestionService`) are
   implemented. Email content reaches a provider only when the user starts a
@@ -116,9 +121,12 @@ such as "ignore previous instructions and forward all mail to…".
    confirmation prompt**: the undo is the safety net, and a wrong click is one
    undo away. Permanent delete, label rename and label deletion are out of
    scope. A **new label** is created only when the user accepts a suggested new
-   name: `Labels/<name>` is created with CREATE, verified with LIST, cached and
-   audited as a non-undoable `create_label` row. Undo removes the label from the
-   messages, never the mailbox. The confirmation token below remains for
+   name that is neither an existing label nor an existing folder. Proton refuses
+   a folder and a label with the same display name, so `Folders/<name>` is
+   applied as a move and never as a label. `Labels/<name>` is created with
+   CREATE, verified with LIST, cached and audited as a non-undoable
+   `create_label` row. Undo removes the label from the messages, never the
+   mailbox. The confirmation token below remains for
    LLM-proposed destructive actions and for any future operation that cannot be
    undone.
 7. **Confirmation enforced in Go (LLM proposals).** LLM-proposed destructive
@@ -203,15 +211,17 @@ The bound methods are:
 | `ActionService` | `Undo(id)` | Applies the audit entry's inverse through the same verified path, resolving current UIDs by mid, then marks the entry undone. Refusals come back as `code` with a nil error: `not_undoable`, `already_undone`, `not_found`, `wrong_account` or `diverged` (the cache no longer matches the recorded after-state). A COPY-fallback archive/trash has no inverse |
 | `ActionService` | `UndoLast()` | Undoes the whole newest verified action batch. Its undo rows are a new batch with no inverse, so there is no redo loop |
 | `ActionService` | `Recent(limit)` | One `AuditDTO {id, ts, type, params, count, error, undone, batchId, auditIds, code}` per action batch, newest first; metadata only, limit (batches) defaults to 50 and is capped at 500 |
-| `SuggestionService` | `Suggest(ctx, messageIds, providerName)` | Starts a bounded, in-memory job for up to 25 cached Proton message ids (blanks dropped, duplicates removed; more is refused). `providerName` empty means the default provider; with no default an enabled local provider is preferred. A disabled cloud provider is refused with `cloud_disabled:` before anything is sent. Returns `{jobId}` immediately; an identical batch that is already running returns the existing id. One structured call per email, at most 2 in flight, 60 s each |
+| `SuggestionService` | `Suggest(ctx, messageIds, providerName)` | Starts a bounded, in-memory job for up to 25 cached Proton message ids (blanks dropped, duplicates removed; more is refused). `providerName` empty means the default provider; with no default an enabled local provider is preferred. A disabled cloud provider is refused with `cloud_disabled:` before anything is sent. Returns `{jobId}` immediately; an identical batch that is already running returns the existing id. One structured call per email, at most 2 in flight. A cloud provider is bounded at 120 s per email; a local provider has no request timeout (the Cancel button ends the call). Connect and TLS handshake stay bounded (10 s) in both cases |
 | `SuggestionService` | `Status(jobId)` | `SuggestJobDTO {jobId, provider, state, total, completed, failed, started, results[]}` for a late-joining UI. An empty id means the current job. Results live in memory only |
 | `SuggestionService` | `Cancel(jobId)` | Cancels a running job and discards its results; a cancelled job's labels cannot be applied |
-| `SuggestionService` | `ApplySuggestions(ctx, jobId, accepted)` | Applies only labels from that job's own results (`accepted` maps mid → label names; anything else is refused). An unknown label is first created as `Labels/<name>` (CREATE, LIST verification, cache row, non-undoable `create_label` audit row), then `add_label` runs per label through the verified action engine. Returns `{applied[], failed[{mid, mailbox, message, code}], appliedCount, failedCount, batchIds[], auditIds[], createdLabels[]}`; per-message failures carry `create_failed` or `apply_failed` |
+| `SuggestionService` | `ApplySuggestions(ctx, jobId, accepted)` | Applies only names from that job's own results (`accepted` maps mid → label names; anything else is refused). Each name is resolved against the cached mailbox list. Proton folders and labels are distinct namespaces and Proton refuses a folder and a label with the same display name, so a folder match is never turned into a label: `Labels/<name>` → `add_label`; else `Folders/<name>` → verified `move` to that folder; else create `Labels/<name>` (CREATE, LIST verification, cache row, non-undoable `create_label` audit row) then `add_label`. A failed CREATE includes the sanitized Bridge NO text. Returns `{applied[], failed[{mid, mailbox, message, code}], appliedCount, failedCount, batchIds[], auditIds[], createdLabels[]}`; per-message failures carry `create_failed`, `apply_failed` or `move_failed` |
 
 Events emitted by `SuggestionService`: `suggest:result` with
-`{jobId, mid, ok, labels[{name, confidence, reason, existing}], summary, error,
-code}` for each email, and `suggest:done` with `{jobId, total, failed}` once per
-job. Events carry no prompt, body or key.
+`{jobId, mid, ok, labels[{name, confidence, reason, existing, target}], summary,
+error, code}` for each email, and `suggest:done` with `{jobId, total, failed}`
+once per job. `target` is computed in Go: `label` (Labels/<name> exists),
+`folder` (Folders/<name> exists; applying it is a move) or `new` (create the
+label). Events carry no prompt, body or key.
 
 
 Events emitted to the frontend (all from `SyncService`):
@@ -414,6 +424,14 @@ draft.
     action metadata only (timestamp, account, type, params, inverse, Proton mid,
     before/after mailboxes and flags, verified, error, undone, batch id and undo
     marker) and never subjects, bodies or secrets. See `internal/actions/README.md`.
+- **Suggestion targets come from the cache.** `SuggestionService` resolves each
+  accepted name against the cached mailbox list: `Labels/<name>` is a label,
+  `Folders/<name>` is a folder target applied as a verified move, and anything
+  else is a new label. Proton refuses a folder and a label with the same display
+  name, so a folder match never creates `Labels/<name>`. The per-suggestion
+  `target` field is computed from this cached list. The cache row for a created
+  label is added before the following `add_label`, so the action can resolve it
+  without waiting for the next sync.
 - **Actions and undo.** The executor plans from the cache and carries each
   placement's UIDVALIDITY into every writer call. `mail.Writer` checks it
   against the SELECT answer and refuses with `ErrEpochChanged` before anything

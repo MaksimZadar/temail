@@ -7,9 +7,10 @@
 //   - Email content is data, never instructions. It is put in the user message
 //     inside a delimited block, and the system prompt says so explicitly. The
 //     model's output is still untrusted: names are filtered and capped here.
-//   - Only allowlisted label names are marked existing. A name that is not in
-//     the cached mailbox list is a new label, and at most MaxNewLabels of those
-//     survive.
+//   - Only allowlisted label names are marked existing. A name that matches a
+//     cached folder is a folder target (a move, not a label) and does not count
+//     as new. Anything in neither list is a new label, and at most MaxNewLabels
+//     of those survive.
 //   - Prompts and replies are never logged by this package.
 package suggest
 
@@ -122,7 +123,7 @@ func One(ctx context.Context, c *llm.Client, msg Message, existing, folders []st
 	if err != nil {
 		return Suggestion{}, err
 	}
-	return Normalize(raw, existing), nil
+	return NormalizeWithFolders(raw, existing, folders), nil
 }
 
 // BuildRequest builds the system prompt and the delimited user message. The
@@ -140,9 +141,9 @@ func systemPrompt(existing, folders []string) string {
 	b.WriteString("Propose at most ")
 	b.WriteString(strconv.Itoa(MaxLabels))
 	b.WriteString(" labels that describe it, strongest first. ")
-	b.WriteString("Prefer an existing label when one fits. You may propose at most ")
+	b.WriteString("Prefer an existing label or folder when one fits. You may propose at most ")
 	b.WriteString(strconv.Itoa(MaxNewLabels))
-	b.WriteString(" new label names; every other label must come from the existing list. ")
+	b.WriteString(" names that are neither an existing label nor an existing folder; every other label must come from one of those lists. ")
 	b.WriteString("A label name is 1 to ")
 	b.WriteString(strconv.Itoa(MaxNameLen))
 	b.WriteString(" characters: letters, digits, spaces, '-', '_' or '.'. ")
@@ -170,7 +171,7 @@ func systemPrompt(existing, folders []string) string {
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString("Folders in this account (context only; do not suggest them as labels):")
+	b.WriteString("Folders in this account (a suggested name that matches a folder is applied as a move, not a new label):")
 	if len(folders) == 0 {
 		b.WriteString(" (none)")
 	} else {
@@ -276,6 +277,14 @@ func TruncateBody(s string) string {
 // MaxLabels labels survive, and Existing is recomputed from the allowlist. It
 // never fails: a bad suggestion degrades to fewer labels.
 func Normalize(s Suggestion, existing []string) Suggestion {
+	return NormalizeWithFolders(s, existing, nil)
+}
+
+// NormalizeWithFolders is Normalize with the account's folder names. A name
+// that matches an existing folder is a folder target, not a new label: it
+// survives the MaxNewLabels cap and keeps its canonical spelling. Existing
+// stays false because it is not a label; the service computes the target.
+func NormalizeWithFolders(s Suggestion, existing, folders []string) Suggestion {
 	canonical := make(map[string]string, len(existing))
 	for _, name := range existing {
 		name = strings.TrimSpace(name)
@@ -285,6 +294,17 @@ func Normalize(s Suggestion, existing []string) Suggestion {
 		key := strings.ToLower(name)
 		if _, ok := canonical[key]; !ok {
 			canonical[key] = name
+		}
+	}
+	folderCanonical := make(map[string]string, len(folders))
+	for _, name := range folders {
+		name = strings.TrimSpace(name)
+		if !ValidLabelName(name) {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := folderCanonical[key]; !ok {
+			folderCanonical[key] = name
 		}
 	}
 
@@ -320,6 +340,9 @@ func Normalize(s Suggestion, existing []string) Suggestion {
 		if known, ok := canonical[key]; ok {
 			l.Name = known
 			l.Existing = true
+		} else if folder, ok := folderCanonical[key]; ok {
+			l.Name = folder
+			l.Existing = false
 		} else {
 			if newCount >= MaxNewLabels {
 				continue
