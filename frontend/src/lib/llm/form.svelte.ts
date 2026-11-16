@@ -13,6 +13,23 @@ import { validate, type FieldErrors } from "./validate";
 export type ModelsState =
   "idle" | "loading" | "ready" | "unsupported" | "error";
 
+export type CapsState = "idle" | "loading" | "ready" | "unsupported";
+
+export interface ThinkingOption {
+  value: string;
+  label: string;
+}
+
+const THINK_LABELS: Record<string, string> = {
+  "": "Model default",
+  none: "Off (faster)",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+};
+export const thinkingLabel = (v: string): string => THINK_LABELS[v] ?? v;
+const FALLBACK_VALUES = ["", "none", "low", "medium", "high"];
+
 export interface FormError {
   title: string;
   body: string;
@@ -38,6 +55,10 @@ export class ProviderForm {
   models = $state<string[]>([]);
   modelsState = $state<ModelsState>("idle");
   manualModel = $state(false);
+
+  capsState = $state<CapsState>("idle");
+  thinkingValues = $state<string[]>([]);
+  thinkingDefault = $state("");
 
   busy = $state(false);
   error = $state<FormError | null>(null);
@@ -74,6 +95,29 @@ export class ProviderForm {
         this.keyRequired || (this.kind === "cloud" && this.mode === "create"),
       existing: this.existing(),
     });
+  }
+  /** Thinking is offered for local providers only. */
+  get thinkingVisible(): boolean {
+    return this.kind === "local";
+  }
+  get thinkingOptions(): ThinkingOption[] {
+    const detected = this.capsState === "ready";
+    let values = detected ? [...this.thinkingValues] : [...FALLBACK_VALUES];
+    if (detected) {
+      for (const v of ["", "none"]) if (!values.includes(v)) values.push(v);
+      const rank = (v: string): number => {
+        const i = FALLBACK_VALUES.indexOf(v);
+        return i < 0 ? 99 : i;
+      };
+      values = values.filter((v, i) => values.indexOf(v) === i).sort((a, b) => rank(a) - rank(b));
+    }
+    if (!values.includes(this.thinking)) values.push(this.thinking);
+    return values.map((v) => ({
+      value: v,
+      label:
+        thinkingLabel(v) +
+        (detected && v === this.thinkingDefault && v !== "" ? " (default)" : ""),
+    }));
   }
   get urlChanged(): boolean {
     return this.mode === "edit" && this.baseURL.trim() !== this.originalURL;
@@ -137,6 +181,9 @@ export class ProviderForm {
     this.models = [];
     this.modelsState = "idle";
     this.manualModel = false;
+    this.capsState = "idle";
+    this.thinkingValues = [];
+    this.thinkingDefault = "";
     this.busy = false;
   }
 
@@ -258,5 +305,37 @@ export class ProviderForm {
       return;
     }
     this.model = value;
+    // Cheap when the provider is already saved at this address.
+    if (this.thinkingVisible && this.mode === "edit" && !this.urlChanged && value) {
+      void this.detectThinking(true);
+    }
+  }
+
+  /** Ask the model what thinking levels it supports. Falls back to a plain list. */
+  async detectThinking(quiet = false): Promise<void> {
+    if (this.busy || this.capsState === "loading" || !this.thinkingVisible) return;
+    if (!quiet) {
+      this.showErrors = true;
+      const e = this.errors;
+      if (e.name || e.baseURL) return;
+      if (this.mode === "create" || this.urlChanged || this.apiKey !== "") {
+        const enabled = this.mode === "create" || this.originalEnabled;
+        if (!(await this.persist(enabled))) return;
+        this.onSaved(this.name.trim(), false);
+      }
+    }
+    this.capsState = "loading";
+    try {
+      const c = await api.modelCapabilities(this.name.trim(), this.model.trim());
+      if (c?.thinkingSupported) {
+        this.thinkingValues = c.thinkingValues ?? [];
+        this.thinkingDefault = c.thinkingDefault ?? "";
+        this.capsState = "ready";
+      } else {
+        this.capsState = "unsupported";
+      }
+    } catch {
+      this.capsState = "unsupported";
+    }
   }
 }

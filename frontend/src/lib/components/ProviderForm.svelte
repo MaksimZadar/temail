@@ -238,6 +238,41 @@
     </div>
   </fieldset>
 
+  {#if form.thinkingVisible}
+    <div class="field">
+      <label for="pf-think">Thinking</label>
+      <div class="row">
+        <select
+          id="pf-think"
+          bind:value={form.thinking}
+          disabled={form.busy || form.capsState === "loading"}
+          aria-describedby="pf-think-h"
+        >
+          {#each form.thinkingOptions as o (o.value)}
+            <option value={o.value}>{o.label}</option>
+          {/each}
+        </select>
+        <button
+          class="btn"
+          type="button"
+          disabled={form.busy || form.capsState === "loading"}
+          onclick={() => form.detectThinking()}
+        >
+          {form.capsState === "loading" ? "Detecting…" : "Detect"}
+        </button>
+      </div>
+      <small id="pf-think-h" role="status" aria-live="polite">
+        Reasoning before answering. Off is much faster for labeling; temail uses
+        Off for local labeling unless you change it here.
+        {#if form.capsState === "ready"}
+          Options match this model.
+        {:else}
+          Support depends on the model.
+        {/if}
+      </small>
+    </div>
+  {/if}
+
   {#if cloud}
     <label class="check">
       <input type="checkbox" bind:checked={form.enabled} />
