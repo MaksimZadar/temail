@@ -4,7 +4,7 @@
   import { actions } from "../stores/actions.svelte";
   import { trapFocus } from "../focus";
   import { formatListDate } from "../mail/format";
-  import { doneText } from "../mail/actions";
+  import { doneText, undoCodeText } from "../mail/actions";
   import type { ActionType } from "../api";
 
   let dialog: HTMLDivElement;
@@ -43,8 +43,8 @@
       <p class="err" role="alert">{actions.activityError}</p>
     {/if}
     <ul aria-label="Recent actions" aria-busy={actions.activityLoading}>
-      {#each actions.activity as e (e.id)}
-        <li class:undone={e.undone}>
+      {#each actions.activity as e (e.batchId || e.id)}
+        <li class:undone={e.undone || e.code === "already_undone"}>
           <div class="what">
             <span>{e.type === "undo" ? "Undo" : text(e)}</span>
             <span class="when">
@@ -56,8 +56,9 @@
           <button
             class="btn"
             type="button"
-            disabled={e.undone || !!e.error || e.type === "undo"}
-            onclick={() => void actions.undoEntry(e.id)}>Undo</button
+            disabled={!!e.code || !!e.error || e.type === "undo" || !(e.auditIds ?? []).length}
+            title={e.code ? undoCodeText(e.code) : "Undo this action"}
+            onclick={() => void actions.undoBatch(e.auditIds ?? [])}>Undo</button
           >
         </li>
       {:else}

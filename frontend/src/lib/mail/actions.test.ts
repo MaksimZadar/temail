@@ -6,7 +6,8 @@ import {
   doneText,
   failureText,
   filterFolders,
-  isNotUndoable,
+  undoCodeText,
+  friendlyFailure,
   labelStates,
   mergeResults,
   moveActionFor,
@@ -65,9 +66,26 @@ describe("texts", () => {
     ]);
     expect([r.appliedCount, r.failedCount]).toEqual([1, 1]);
   });
-  it("recognises the not-undoable error", () => {
-    expect(isNotUndoable(new Error("action has no inverse"))).toBe(true);
-    expect(isNotUndoable(new Error("offline"))).toBe(false);
+  it("has friendly copy for every undo code", () => {
+    expect(undoCodeText("not_found")).toBe("Nothing to undo");
+    expect(undoCodeText("already_undone")).toBe("Already undone");
+    expect(undoCodeText("not_undoable")).toBe("This action can't be undone");
+    expect(undoCodeText("diverged")).toMatch(/changed since then/);
+  });
+  it("rewrites a copy-only failure once", () => {
+    const m =
+      "archived copy created; original still in INBOX — try again after the folders finish syncing";
+    expect(friendlyFailure(m)).toBe(
+      "Created the copy, but the original is still in INBOX — it will be resolved after the folders sync",
+    );
+    expect(friendlyFailure("offline")).toBe("offline");
+  });
+  it("merges batch ids and audit ids", () => {
+    const r = mergeResults([
+      { applied: [], failed: null, appliedCount: 0, failedCount: 0, batchId: "b1", auditIds: [1, 2] },
+      { applied: [], failed: null, appliedCount: 0, failedCount: 0, batchId: "b2", auditIds: [3] },
+    ]);
+    expect(r.auditIds).toEqual([1, 2, 3]);
   });
 });
 
