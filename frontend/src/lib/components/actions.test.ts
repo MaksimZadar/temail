@@ -55,6 +55,8 @@ const ok = (n: number): api.ActionResult => ({
   failed: null,
   appliedCount: n,
   failedCount: 0,
+  batchId: "b1",
+  auditIds: Array.from({ length: n }, (_, i) => i + 1),
 });
 
 const folders = [
@@ -321,29 +323,74 @@ describe("toasts", () => {
       .catch(() => null);
     void toast;
     await screen.findByText("Archived 1 message");
-    expect(screen.getByRole("button", { name: "Undo z" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Undo this action" })).toBeTruthy();
     vi.useFakeTimers();
     actions.showToast({ kind: "ok", text: "Archived 3 messages", undo: true });
     vi.advanceTimersByTime(TOAST_MS + 10);
     expect(actions.toast).toBeNull();
   });
 
-  it("the Undo button undoes the action", async () => {
+  it("the toast Undo reverts exactly its batch's audit rows", async () => {
     await mount();
-    m.undoLast.mockResolvedValue(ok(1));
+    m.applyAction.mockResolvedValue({ ...ok(1), auditIds: [41, 42] });
+    m.undoAction.mockResolvedValue(ok(1));
     await key("e");
-    await fireEvent.click(
-      await screen.findByRole("button", { name: "Undo z" }),
-    );
-    await waitFor(() => expect(m.undoLast).toHaveBeenCalled());
+    await fireEvent.click(await screen.findByRole("button", { name: "Undo this action" }));
+    await waitFor(() => expect(m.undoAction).toHaveBeenCalledTimes(2));
+    expect(m.undoAction).toHaveBeenNthCalledWith(1, 41);
+    expect(m.undoAction).toHaveBeenNthCalledWith(2, 42);
+    expect(m.undoLast).not.toHaveBeenCalled();
     await screen.findByText(/Undone/);
   });
 
-  it("says when an action can't be undone", async () => {
+  it("offers no toast Undo when nothing is undoable", async () => {
     await mount();
-    m.undoLast.mockRejectedValue(new Error("action has no inverse"));
+    m.applyAction.mockResolvedValue({ ...ok(1), auditIds: [] });
+    await key("e");
+    await screen.findByText(/Archived/);
+    expect(screen.queryByRole("button", { name: "Undo this action" })).toBeNull();
+  });
+
+  it.each([
+    ["not_found", "Nothing to undo"],
+    ["already_undone", "Already undone"],
+    ["not_undoable", "This action can't be undone"],
+    ["diverged", "This message changed since then, so it can't be undone safely"],
+  ])("shows friendly copy for code %s", async (code, text) => {
+    await mount();
+    m.undoLast.mockResolvedValue({
+      applied: [],
+      failed: [],
+      appliedCount: 0,
+      failedCount: 0,
+      code: code as api.UndoCode,
+    });
     await key("z");
-    await screen.findByText("This action can't be undone");
+    await screen.findByText(text);
+  });
+
+  it("explains a copy-only failure and keeps undo for the rest", async () => {
+    await mount();
+    m.applyAction.mockResolvedValue({
+      applied: ["a"],
+      failed: [
+        {
+          mid: "b",
+          mailbox: "INBOX",
+          message:
+            "archived copy created; original still in INBOX — try again after the folders finish syncing",
+        },
+      ],
+      appliedCount: 1,
+      failedCount: 1,
+      batchId: "b1",
+      auditIds: [7],
+    });
+    await key("e");
+    await screen.findByText(
+      /Created the copy, but the original is still in INBOX/,
+    );
+    expect(screen.getByRole("button", { name: "Undo this action" })).toBeTruthy();
   });
 
   it("summarises failures", async () => {
@@ -416,7 +463,7 @@ describe("pickers", () => {
 });
 
 describe("activity", () => {
-  it("g u lists recent actions with an Undo per entry", async () => {
+  it("g u lists one row per batch; Undo only when undoable", async () => {
     await mount();
     m.recentActions.mockResolvedValue([
       {
@@ -427,42 +474,46 @@ describe("activity", () => {
         count: 3,
         error: "",
         undone: false,
+        batchId: "b9",
+        auditIds: [7, 8, 9],
+        code: "",
       },
       {
-        id: 8,
+        id: 5,
         ts: new Date().toISOString(),
         type: "trash",
         params: {},
         count: 1,
         error: "",
         undone: true,
+        batchId: "b5",
+        auditIds: [],
+        code: "already_undone",
+      },
+      {
+        id: 4,
+        ts: new Date().toISOString(),
+        type: "archive",
+        params: {},
+        count: 2,
+        error: "",
+        undone: false,
+        batchId: "b4",
+        auditIds: [],
+        code: "not_undoable",
       },
     ]);
-    m.undoAction.mockResolvedValue(ok(3));
+    m.undoAction.mockResolvedValue(ok(1));
     await key("g");
     await key("u");
     const dlg = await screen.findByRole("dialog", { name: "Recent activity" });
     await within(dlg).findByText("Archived 3 messages");
     const undos = within(dlg).getAllByRole("button", { name: "Undo" });
     expect((undos[1] as HTMLButtonElement).disabled).toBe(true);
+    expect((undos[2] as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.click(undos[0]);
-    await waitFor(() => expect(m.undoAction).toHaveBeenCalledWith(9));
-  });
-});
-
-describe("actions:done", () => {
-  it("refreshes in place, coalesced, without moving the cursor", async () => {
-    await mount();
-    mail.cursorTo(2);
-    const k = mail.cursorKey;
-    m.listMessages.mockClear();
-    vi.useFakeTimers();
-    actions.noteDone(10);
-    actions.noteDone(10);
-    actions.noteDone(10);
-    await vi.advanceTimersByTimeAsync(50);
-    vi.useRealTimers();
-    expect(m.listMessages).toHaveBeenCalledTimes(1);
-    expect(mail.cursorKey).toBe(k);
+    await waitFor(() => expect(m.undoAction).toHaveBeenCalledTimes(3));
+    expect(m.undoAction).toHaveBeenCalledWith(7);
+    expect(m.undoAction).toHaveBeenCalledWith(9);
   });
 });

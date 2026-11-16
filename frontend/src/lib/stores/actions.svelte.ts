@@ -5,7 +5,7 @@ import {
   chunk,
   doneText,
   failureText,
-  isNotUndoable,
+  undoCodeText,
   mergeResults,
 } from "../mail/actions";
 import { layout } from "./layout.svelte";
@@ -26,12 +26,20 @@ export interface Toast {
   id: number;
   kind: "ok" | "error" | "info";
   text: string;
-  /** Show an Undo button (undoes the newest action). */
+  /** Show an Undo button. */
   undo: boolean;
+  /** The exact audit rows this toast's Undo reverts. */
+  auditIds?: number[];
 }
 
 export const isStarred = (h: api.MessageHeader): boolean =>
   (h.flags ?? []).some((f) => f.toLowerCase() === "\\flagged");
+
+/** A toast offers Undo only for rows Go says are undoable. */
+const undoOf = (res: api.ActionResult) => {
+  const auditIds = res.auditIds ?? [];
+  return { undo: auditIds.length > 0, auditIds };
+};
 
 class Actions {
   /** Rows an action is running on (message keys). */
@@ -167,6 +175,7 @@ class Actions {
             failed: parts[i].map((mid) => ({ mid, mailbox: "", message })),
             appliedCount: 0,
             failedCount: parts[i].length,
+            auditIds: [],
           });
         }
       }
@@ -215,26 +224,33 @@ class Actions {
           ? `${doneText(type, res.appliedCount, param)}. `
           : "";
       this.showToast(
-        { kind: "error", text: ok + f, undo: res.appliedCount > 0 },
+        { kind: "error", text: ok + f, ...undoOf(res) },
         TOAST_MS * 2,
       );
     } else if (res.appliedCount > 0) {
       this.showToast({
         kind: "ok",
         text: doneText(type, res.appliedCount, param),
-        undo: true,
+        ...undoOf(res),
       });
     }
   }
 
   // ---- undo ----
 
-  private async finishUndo(p: Promise<api.ActionResult>): Promise<void> {
+  private async finishUndo(
+    p: () => Promise<api.ActionResult>,
+  ): Promise<void> {
     this.running++;
     try {
-      const res = await p;
+      const res = await p();
       const failed = res.failed ?? [];
-      if (failed.length > 0)
+      if (res.code && res.appliedCount === 0 && failed.length === 0)
+        this.showToast(
+          { kind: "info", text: undoCodeText(res.code), undo: false },
+          TOAST_MS,
+        );
+      else if (failed.length > 0)
         this.showToast(
           {
             kind: "error",
@@ -251,11 +267,7 @@ class Actions {
         });
     } catch (e) {
       this.showToast(
-        {
-          kind: "error",
-          text: isNotUndoable(e) ? "This action can't be undone" : errText(e),
-          undo: false,
-        },
+        { kind: "error", text: errText(e), undo: false },
         TOAST_MS * 2,
       );
     } finally {
@@ -265,11 +277,22 @@ class Actions {
     if (ui.overlay === "activity") void this.loadActivity();
   }
 
+  /** Undo the newest action (the z key, toolbar and palette). */
   undoLast(): Promise<void> {
-    return this.finishUndo(api.undoLast());
+    return this.finishUndo(() => api.undoLast());
   }
-  undoEntry(id: number): Promise<void> {
-    return this.finishUndo(api.undoAction(id));
+
+  /** Undo exactly these audit rows (one batch), one Undo call each. */
+  undoBatch(auditIds: number[]): Promise<void> {
+    return this.finishUndo(async () => {
+      const rs: api.ActionResult[] = [];
+      for (const id of auditIds) rs.push(await api.undoAction(id));
+      // A refusal on only some rows still counts as undone for the rest.
+      const merged = mergeResults(rs);
+      if (merged.appliedCount > 0 || (merged.failed ?? []).length > 0)
+        merged.code = "";
+      return merged;
+    });
   }
 
   // ---- activity ----

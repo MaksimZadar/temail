@@ -18,11 +18,13 @@
       <button
         class="undo"
         type="button"
-        title="Undo (z)"
+        title="Undo this action"
+        aria-label="Undo this action"
         onclick={() => {
+          const ids = t.auditIds ?? [];
           actions.dismissToast();
-          void actions.undoLast();
-        }}>Undo <kbd>z</kbd></button
+          void actions.undoBatch(ids);
+        }}>Undo</button
       >
     {/if}
     <button

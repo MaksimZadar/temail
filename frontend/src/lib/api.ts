@@ -189,7 +189,19 @@ export interface ActionResult {
   failed: ActionFailure[] | null;
   appliedCount: number;
   failedCount: number;
+  batchId?: string;
+  /** Audit rows that can be undone (partial or unverified ones are left out). */
+  auditIds?: number[] | null;
+  /** Set by Undo/UndoLast refusals; empty for a normal result. */
+  code?: UndoCode | "";
 }
+export type UndoCode =
+  | "not_undoable"
+  | "already_undone"
+  | "not_found"
+  | "wrong_account"
+  | "diverged";
+/** One row per action batch; count is the number of messages. */
 export interface AuditEntry {
   id: number;
   ts: string;
@@ -198,6 +210,10 @@ export interface AuditEntry {
   count: number;
   error: string;
   undone: boolean;
+  batchId?: string;
+  auditIds?: number[] | null;
+  /** Why the batch can't be undone; empty when it can. */
+  code?: UndoCode | "";
 }
 export interface ActionsDone {
   type: string;

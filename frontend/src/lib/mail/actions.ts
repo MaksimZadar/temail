@@ -2,6 +2,7 @@ import type {
   ActionFailure,
   ActionResult,
   ActionType,
+  UndoCode,
   MailboxDTO,
   MailboxRef,
 } from "../api";
@@ -46,12 +47,24 @@ export function doneText(
   return `${PAST[type] ?? "Done"} ${n}`;
 }
 
+/**
+ * A copy-only result ("archived copy created; original still in INBOX — try
+ * again after the folders finish syncing") becomes one clear sentence.
+ */
+export function friendlyFailure(message: string): string {
+  const m = /original still in (.+?)(?: —|$)/.exec(message ?? "");
+  if (!m || !/cop(y|ied)/i.test(message)) return message;
+  return `Created the copy, but the original is still in ${m[1]} — it will be resolved after the folders sync`;
+}
+
 /** "2 of 5 failed: <reason>" (the most common reason, plus "and more"). */
 export function failureText(failed: ActionFailure[], total: number): string {
   if (failed.length === 0) return "";
   const counts = new Map<string, number>();
-  for (const f of failed)
-    counts.set(f.message, (counts.get(f.message) ?? 0) + 1);
+  for (const f of failed) {
+    const m = friendlyFailure(f.message);
+    counts.set(m, (counts.get(m) ?? 0) + 1);
+  }
   const [top] = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   const more = counts.size > 1 ? ` (and ${counts.size - 1} other reasons)` : "";
   return `${failed.length} of ${total} failed: ${top[0] || "unknown error"}${more}`;
@@ -66,13 +79,24 @@ export function mergeResults(rs: ActionResult[]): ActionResult {
     failed,
     appliedCount: applied.length,
     failedCount: failed.length,
+    batchId: rs.map((r) => r.batchId).find(Boolean),
+    auditIds: rs.flatMap((r) => r.auditIds ?? []),
+    code: rs.map((r) => r.code).find(Boolean) ?? "",
   };
 }
 
-export const isNotUndoable = (e: unknown): boolean =>
-  /no inverse|not undoable|can'?t be undone/i.test(
-    e instanceof Error ? e.message : String(e ?? ""),
-  );
+const UNDO_TEXT: Record<UndoCode, string> = {
+  not_undoable: "This action can't be undone",
+  already_undone: "Already undone",
+  not_found: "Nothing to undo",
+  wrong_account: "Nothing to undo",
+  diverged:
+    "This message changed since then, so it can't be undone safely",
+};
+
+/** Friendly copy for an undo refusal code. */
+export const undoCodeText = (code: UndoCode): string =>
+  UNDO_TEXT[code] ?? "This action can't be undone";
 
 /** Folders a message can be moved to: Folders/* plus Archive, Trash, Spam. */
 export function moveTargets(folders: MailboxDTO[]): MailboxDTO[] {
