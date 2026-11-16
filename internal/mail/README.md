@@ -7,7 +7,7 @@ Built on `github.com/emersion/go-imap/v2` (beta, kept behind the `Client`
 interface), `github.com/jhillyerd/enmime` for MIME, and
 `github.com/microcosm-cc/bluemonday` for HTML sanitisation.
 
-## Read-only guarantee
+## Read-only guarantee (Client)
 
 - The `Client` interface has no write methods. A test checks the method names.
 - The implementation issues only: `LOGIN`, `LIST`, `STATUS`, `EXAMINE` (SELECT
@@ -18,13 +18,40 @@ interface), `github.com/jhillyerd/enmime` for MIME, and
   `DELETE`, `RENAME`, `SUBSCRIBE` or `UNSUBSCRIBE`.
 - Three checks back this up in the test suite:
   1. `TestNoWriteCallsInSource` parses the non-test source and fails on a call
-     to any write method.
-  2. `TestReadOnlyAcrossAllOperations` runs every operation against a test
-     server that wraps its session. Each write method there records the call and
-     returns an error. The test asserts that nothing was recorded, that every
+     to any write method outside `writer.go`, the reviewed write-capable type.
+  2. `TestReadOnlyAcrossAllOperations` runs every `Client` operation against a
+     test server that wraps its session. Each write method there records the call
+     and returns an error. The test asserts that nothing was recorded, that every
      SELECT was `EXAMINE`, and that every body fetch used `PEEK`.
   3. Fetching a message does not set `\Seen`. The test checks the unseen count
      after a fetch.
+
+## Writer (write-capable, separate type)
+
+`mail.Writer` is a **separate** interface and implementation from `Client`. It
+shares `connectBridge` (the pin, TLS and login rules) but not the read client's
+method set. `internal/actions` is its only caller; see that package's README for
+the recipes and the expunge rule.
+
+- `StoreFlags(mailbox, uids, add, remove)`: `SELECT` then one or two
+  `UID STORE ±FLAGS.SILENT`.
+- `Move(mailbox, uids, target)`: `UID MOVE`, returning COPYUID (source/dest UIDs
+  and the target UIDVALIDITY) when the server reports it.
+- `Copy(mailbox, uids, target)`: `UID COPY`, returning COPYUID.
+- `ExpungeDeleted(mailbox, uids)`: `UID STORE +\Deleted` then `UID EXPUNGE` for
+  exactly those UIDs. It refuses with `ErrExpungeUnsupported` when the server has
+  neither UIDPLUS nor IMAP4rev2, because a plain `EXPUNGE` would remove every
+  `\Deleted` message in the mailbox. Actions calls it only for a
+  `Labels/<name>` mailbox.
+- `SearchInternalID(mailbox, mid)`: `UID SEARCH HEADER X-Pm-Internal-Id`,
+  `EXAMINE`-only. The verification fallback when COPYUID is missing.
+- `FetchFlags(mailbox, uids)`: `EXAMINE` then `UID FETCH (UID FLAGS)`; absent
+  UIDs are absent from the map.
+- Cancelling a call's context closes the connection, as with `Client`.
+
+`TestNoWriteCallsInSource` skips `writer.go` deliberately; the guard that an
+expunging call appears only in actions' label path is
+`TestNoExpungeOutsideLabelPath` in `internal/actions`.
 
 ## Identity (`identity.go`)
 

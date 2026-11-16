@@ -3,20 +3,27 @@
 The Wails layer between the webview and the Go packages. It is thin: it
 validates arguments, calls the packages below, shapes JSON-friendly results and
 emits events. The business logic stays in `internal/config`, `internal/secrets`,
-`internal/bridge`, `internal/mail`, `internal/store` and `internal/sync`.
+`internal/bridge`, `internal/mail`, `internal/store`, `internal/sync` and
+`internal/actions`.
 
-**Trust boundary.** Every exported method of the three services is bound, so any
+**Trust boundary.** Every exported method of the services is bound, so any
 JavaScript in the webview can call it. Read `docs/ARCHITECTURE.md` §3.3 before
 adding a method. The rules are:
 
-- Read-only against the mailbox. No SMTP, no LLM, no flag, move or delete.
+- Read-only against the mailbox, with one reviewed exception: `ActionService`
+  is the intentional write boundary. Its four methods reach only the allowlisted,
+  verified recipes in `internal/actions` (no permanent delete, no label
+  create/rename, no drafts). Every action is audited and undoable. The other
+  services never write flags, folders or messages.
 - No secret goes out: no password or API key in a return value, an error, an
   event or a log line. The password comes in only through `SaveAccount`.
 - Inputs are validated here (mailbox length, UID, part ID pattern, fingerprint
-  format, loopback host). No filesystem path comes from JS.
+  format, loopback host, action type and batch size). No filesystem path comes
+  from JS.
 - The methods are checked by tests (`bindings_test.go`): the bound method set
-  is exact, the names contain no write verbs, and no returned type has a
-  secret-looking field. Changing the set fails the test on purpose.
+  is exact, the names contain no write verbs outside `ActionService`, and no
+  returned type has a secret-looking field. Changing the set fails the test on
+  purpose.
 
 ## Services and bound methods
 
@@ -26,6 +33,7 @@ adding a method. The rules are:
 | `MailService` | `CacheInfo(ctx)`, `ListMailboxes(ctx)`, `ListMessages(ctx, mailbox, cursor, limit)`, `GetMessage(ctx, mailbox, uidValidity, uid)`, `GetAttachment(ctx, mailbox, uidValidity, uid, partID)` |
 | `SyncService` | `Start()`, `Stop()`, `Status()` |
 | `LLMService` | `ListProviders()`, `SaveProvider(input)`, `DeleteProvider(name)`, `SetDefaultProvider(name)`, `TestProvider(ctx, name)`, `ListModels(ctx, name)` |
+| `ActionService` | `Apply(ctx, ActionDTO)`, `Undo(ctx, id)`, `UndoLast(ctx)`, `Recent(ctx, limit)` |
 
 `ctx` is the Wails call context. It is not part of the JavaScript signature.
 
@@ -44,9 +52,11 @@ credentials read after the restart. If the autostart's credential read takes
 longer than 10 s (a locked keychain), the autostart bumps the generation, so the
 late launch cannot start a run unless the user asks.
 
-`services.Shutdown(sync, mail, store)`: stop the sync, then `mail.shutdown()`
-(refuse new calls, cancel running ones, close the Bridge session, wait up to
-10 s for in-flight reads), then close the cache. If either step did not finish,
+`services.Shutdown(sync, mail, store, actions...)`: stop the sync, then
+`mail.shutdown()` (refuse new calls, cancel running ones, close the Bridge
+session, wait up to 10 s for in-flight reads), then each action service's
+shutdown (refuse new calls, wait for in-flight writes, close the Writer
+connections and `audit.db`), then close the cache. If any step did not finish,
 the cache stays open and the error says so.
 
 ### Configuration writes
@@ -234,6 +244,36 @@ banned, since config writes are its job), and the secret-field check. The
 `SaveProvider` input struct is allowed to carry `apiKey`, and nothing returned
 may.
 
+### ActionService (phase P5)
+
+The only bound service with mailbox write methods. The writes live in
+`internal/actions`; this layer validates the DTO, builds the executor lazily and
+emits one coalesced event.
+
+- `Apply(ActionDTO)` with `{type, params{folder|label}, messageIds}`. The type
+  must be one of the v1 allowlist, the batch is capped at 100 ids, and the ids
+  are Proton mids, never UIDs. `actions.Validate` runs here, so bad input fails
+  with `ErrInvalidInput` before any cache read or connection. The result is
+  `{applied, failed[{mid, mailbox, message}], appliedCount, failedCount}`.
+  Per-message failures do not fail the call.
+- `Undo(id)` resolves the audit entry's inverse and applies it through the same
+  verified path. `UndoLast()` does the same for the newest verified entry.
+  `ErrNotUndoable` covers an archive/trash that had to COPY from All Mail.
+- `Recent(limit)` returns `AuditDTO {id, ts, type, params, count, error, undone}`.
+  Metadata only; no subject or body is ever in the audit log or the DTO.
+- The executor is built per configured account. The password is read lazily
+  through `bridge.Password` on the first connect, the certificate must be pinned
+  (`bridge.ErrNotPinned` otherwise), and the writer uses `mail.Writer`, whose
+  `Connect` follows the same pin/TLS rules as the read client.
+- The auth latch is the sync service's latch, keyed by `sync.CredsKey`, so a
+  refused login on any path stops all of them for those credentials.
+- `actions:done` `{type, count, failed}` is emitted after a burst of actions
+  (100 ms coalescing window), not per message.
+
+Tests (`actions_test.go`) use a fake engine: DTO mapping and validation, undo,
+recent, the coalesced event, shutdown refusal, and camelCase/no-content JSON.
+The executor itself is covered in `internal/actions`.
+
 ## Injection
 
 Each service takes interfaces, so tests use fakes:
@@ -241,13 +281,14 @@ Each service takes interfaces, so tests use fakes:
 - `ConfigStore` (`Load`, `Save`): `*config.Manager`.
 - `SecretStore` (the `secrets.Store` methods plus `Probe`): `*secrets.KeyringStore`.
 - `ClientFactory` (`func() mail.Client`): `mail.NewClient`.
+- `func() mail.Writer`: `mail.NewWriter` for `ActionService`.
 - `Emitter` (`Emit`): `app.Event`.
 - `store.Store`: the SQLite cache. Tests use a fake for `MailService` and a real
   SQLite file in `t.TempDir()` for `SyncService`.
 
 `main.go` builds the wiring and registers the services with `app.RegisterService`.
-The shutdown hook stops the sync and closes the cache. The services shut down
-after the hook runs.
+The shutdown hook stops the sync, mail reads and action writes and closes the
+cache. The services shut down after the hook runs.
 
 ## Tests
 
@@ -291,6 +332,9 @@ after the hook runs.
   its context; the keyring probe times out and is cached; config changes during
   a probe are refused; `replace` for pins; `SaveAccount` keeps the stored
   password, fails without one, and restores config when the keyring fails.
+- `actions_test.go`: the action DTO mapping, input refusal, undo id validation,
+  recent conversion, coalesced `actions:done`, shutdown refusal, and camelCase
+  JSON with no message content.
 
 Run with `go test -race ./internal/services/`. The race detector needs cgo
 (`CGO_ENABLED=1`). The `mise run test` task runs with cgo off and no `-race`.
