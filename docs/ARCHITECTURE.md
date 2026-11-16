@@ -191,10 +191,10 @@ The bound methods are:
 | `LLMService` | `SetDefaultProvider(name)` | Sets the default provider; an empty name clears it |
 | `LLMService` | `TestProvider(ctx, name)` | One tiny structured call. Returns `ProviderTest` `{ok, category, message}`. Categories: the six from `internal/llm` (`ok`, `unreachable`, `unauthorized`, `model_not_found`, `structured_output_unsupported`, `timeout`, `other`) plus `cloud_disabled`, `no_model` and `keyring_unavailable`, `key_needs_reentry` (a stored key was not approved for the current base URL; the user enters the key again) |
 | `LLMService` | `ListModels(ctx, name)` | Model IDs the endpoint lists, sorted. An endpoint without a models route returns an empty list and an error, and the UI asks for the model name. A key not bound to the URL returns an empty list and the error `key_needs_reentry: an API key exists that was not approved for this base URL; enter the API key again`. The UI matches the `key_needs_reentry` prefix |
-| `ActionService` | `Apply(ActionDTO)` | One allowlisted action on up to 100 Proton message ids: `mark_read`, `mark_unread`, `star`, `unstar`, `archive`, `move{folder}`, `trash`, `spam`, `not_spam`, `add_label{label}`, `remove_label{label}`. UIDs are resolved from the cache. Every write is verified, cached and audited. Returns `{applied, failed[{mid, mailbox, message}], appliedCount, failedCount}`. Reversible, so no confirmation prompt |
-| `ActionService` | `Undo(id)` | Applies the audit entry's inverse through the same verified path, resolving current UIDs by mid, then marks the entry undone. An archive/trash that had to use COPY from All Mail has no inverse and returns `ErrNotUndoable` |
-| `ActionService` | `UndoLast()` | Undoes the newest verified, not-undone action |
-| `ActionService` | `Recent(limit)` | Newest audit rows as `AuditDTO {id, ts, type, params, count, error, undone}`; metadata only, limit defaults to 50 and is capped at 500 |
+| `ActionService` | `Apply(ActionDTO)` | One allowlisted action on up to 100 Proton message ids: `mark_read`, `mark_unread`, `star`, `unstar`, `archive`, `move{folder}`, `trash`, `spam`, `not_spam`, `add_label{label}`, `remove_label{label}`. UIDs are resolved from the cache. Every write is verified, cached and audited. Returns `{applied, failed[{mid, mailbox, message}], appliedCount, failedCount, batchId, auditIds, code}`; `auditIds` are the undoable rows only, and a COPY fallback is a per-message partial failure. Reversible, so no confirmation prompt |
+| `ActionService` | `Undo(id)` | Applies the audit entry's inverse through the same verified path, resolving current UIDs by mid, then marks the entry undone. Refusals come back as `code` with a nil error: `not_undoable`, `already_undone`, `not_found`, `wrong_account` or `diverged` (the cache no longer matches the recorded after-state). A COPY-fallback archive/trash has no inverse |
+| `ActionService` | `UndoLast()` | Undoes the whole newest verified action batch. Its undo rows are a new batch with no inverse, so there is no redo loop |
+| `ActionService` | `Recent(limit)` | One `AuditDTO {id, ts, type, params, count, error, undone, batchId, auditIds, code}` per action batch, newest first; metadata only, limit (batches) defaults to 50 and is capped at 500 |
 
 Events emitted to the frontend (all from `SyncService`):
 
@@ -353,8 +353,11 @@ permanent delete, no label create/rename and no draft.
   removing a label is STORE `\Deleted` + UID EXPUNGE inside that label only.
   Archive is a MOVE to `Archive` with a COPY fallback on a `NO` answer; from All
   Mail (no folder placement) COPY is used because Bridge refuses MOVE there.
-  Archive, move, trash and spam never expunge. `internal/actions` owns these
-  recipes and is the only caller of the Writer.
+  Archive, move, trash and spam never expunge. Every write carries the cached
+  placement's UIDVALIDITY and is refused on a mismatch before it runs; a COPY
+  fallback that leaves the source in place is reported as a partial failure,
+  never as full success. `internal/actions` owns these recipes and is the only
+  caller of the Writer.
 
 ## 7. Local cache and storage *(implemented in lane 3: `internal/store`, `internal/sync`; see their READMEs)*
 
@@ -371,17 +374,37 @@ permanent delete, no label create/rename and no draft.
   - `audit.db`: the audit log only. It is kept in a separate file so that
     clearing the cache never removes it. It must survive cache resets. It holds
     action metadata only (timestamp, account, type, params, inverse, Proton mid,
-    before/after mailboxes and flags, verified, error, undone) and never
-    subjects, bodies or secrets. See `internal/actions/README.md`.
-- **Actions and undo.** User actions update the cache in one transaction after
-  the write is verified: a flag change updates the message's global flags, a
-  move replaces the source placement with the target placement (COPYUID
-  destination UID), a label add/remove adds or removes one placement. The schema
-  triggers keep `placements_count`, `bodies_count` and `unseen` current. The
-  watch reconcile remains the backstop. Undo resolves the message's current UIDs
-  from the cache by mid and applies the inverse through the same verified path,
-  so it works after UIDs changed; the original audit row is then marked undone.
-  Actions that had to COPY from All Mail have no inverse and say so.
+    before/after mailboxes and flags, verified, error, undone, batch id and undo
+    marker) and never subjects, bodies or secrets. See `internal/actions/README.md`.
+- **Actions and undo.** The executor plans from the cache and carries each
+  placement's UIDVALIDITY into every writer call. `mail.Writer` checks it
+  against the SELECT answer and refuses with `ErrEpochChanged` before anything
+  is written; a stale epoch is a per-message failure and marks the mailbox for a
+  resync. A move or a label expunge first proves that the cached UID still names
+  the message by reading `X-Pm-Internal-Id` (with the Message-ID fallback).
+  A COPY/MOVE result is located by exactly one `UID SEARCH HEADER
+  X-Pm-Internal-Id` in the target, never by zipping COPYUID indexes; when the
+  COPYUID epoch differs from the cached target epoch nothing is written and the
+  outcome is unknown. Audit rows are inserted per group *before* the write
+  (`verified = 0`) and finalised after, so a crash still leaves evidence. A
+  partial or unknown outcome records "unknown outcome", still applies a target
+  placement that was confirmed present, and marks the affected mailboxes stale
+  (the service clears `last_sync` and kicks the watcher). The cache effect is
+  written in one transaction; the schema triggers keep `placements_count`,
+  `bodies_count` and `unseen` current, and the watch reconcile remains the
+  backstop. Undo groups audit rows by `batch_id`, resolves the message's current
+  UIDs from the cache, and refuses with `ErrDiverged` when the cache no longer
+  matches the recorded after-state. Undo rows carry no inverse, so there is no
+  redo loop. A COPY fallback (All Mail source, or a refused Archive MOVE) leaves
+  the source in place and is reported per message as partial, with the original
+  folder named. Messages whose folder placement has never completed a sync are
+  refused rather than guessed.
+- **A benign reconcile race.** The watcher may reconcile the same mailbox
+  between the plan and the write. That is safe: the write is guarded by the
+  epoch and the identity check, and the cache is only updated from a confirmed
+  placement. If the reconcile lands after the write but before the cache update,
+  the next check is authoritative and repairs any difference; the action never
+  writes a placement it did not confirm.
 - **Sync** (`internal/sync`): mailboxes in priority order (All Mail, then the
   system folders, then folders, labels, and the rest; Recovered Messages last),
   headers newest first in windows of 200 UIDs, each committed before the next,

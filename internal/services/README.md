@@ -254,13 +254,28 @@ emits one coalesced event.
   must be one of the v1 allowlist, the batch is capped at 100 ids, and the ids
   are Proton mids, never UIDs. `actions.Validate` runs here, so bad input fails
   with `ErrInvalidInput` before any cache read or connection. The result is
-  `{applied, failed[{mid, mailbox, message}], appliedCount, failedCount}`.
+  `{applied, failed[{mid, mailbox, message}], appliedCount, failedCount,
+  batchId, auditIds, code}`. `auditIds` lists only rows that can be undone.
+  A COPY fallback is reported per message as a partial failure, not as applied.
   Per-message failures do not fail the call.
 - `Undo(id)` resolves the audit entry's inverse and applies it through the same
-  verified path. `UndoLast()` does the same for the newest verified entry.
-  `ErrNotUndoable` covers an archive/trash that had to COPY from All Mail.
-- `Recent(limit)` returns `AuditDTO {id, ts, type, params, count, error, undone}`.
-  Metadata only; no subject or body is ever in the audit log or the DTO.
+  verified path. `UndoLast()` undoes the whole newest verified action batch (all
+  of its audited messages, not one row). An undo action gets its own audit
+  batch and is not undoable again, so there is no redo loop. Audit rows are
+  scoped to the configured account in both `UndoLast` and `Recent`.
+- Undo refusals are returned as a stable `code` with a nil error:
+  `not_undoable`, `already_undone`, `not_found`, `wrong_account` or `diverged`
+  (the cache no longer matches the recorded after-state, so restoring it would
+  lie). `ErrNotUndoable` covers an archive/trash that had to COPY from All Mail
+  or a no-op action.
+- `Recent(limit)` returns one `AuditDTO {id, ts, type, params, count, error,
+  undone, batchId, auditIds, code}` per action batch, newest first; `limit`
+  bounds batches, and `count` is the number of messages in the batch. `code`
+  says why a row cannot be undone (`not_undoable`/`already_undone`/`diverged`)
+  or is empty when `Undo(id)` will be attempted. Metadata only; no subject or
+  body is ever in the audit log or the DTO.
+- `UndoBatch(ids)` is not bound in v1. Use `UndoLast` for the last batch; a
+  frontend batch restore would call `Undo` per `auditIds` entry.
 - The executor is built per configured account. The password is read lazily
   through `bridge.Password` on the first connect, the certificate must be pinned
   (`bridge.ErrNotPinned` otherwise), and the writer uses `mail.Writer`, whose
