@@ -51,16 +51,18 @@ func main() {
 	syncSvc := services.NewSyncService(st, cfg, keyring, mail.NewClient, app.Event)
 	mailSvc := services.NewMailService(st, cfg, keyring, mail.NewClient)
 	setupSvc := services.NewSetupService(cfg, keyring, mail.NewClient, syncSvc)
+	actionSvc := services.NewActionService(st, cfg, keyring, mail.NewWriter, syncSvc, app.Event)
 	app.RegisterService(application.NewService(syncSvc))
 	app.RegisterService(application.NewService(mailSvc))
 	app.RegisterService(application.NewService(setupSvc))
+	app.RegisterService(application.NewService(actionSvc))
 	app.RegisterService(application.NewService(services.NewLLMService(cfg, keyring, services.NewNativeConfirmer(app.Dialog))))
 
-	// The ordered teardown (sync, mail reads, then the cache) runs in this hook,
-	// before the services' own shutdown hooks. It leaves the cache open if a
-	// run or a read did not finish in time.
+	// The ordered teardown (sync, mail reads, action writes, then the cache)
+	// runs in this hook, before the services' own shutdown hooks. It leaves the
+	// cache open if a run, a read or a write did not finish in time.
 	app.OnShutdown(func() {
-		if err := services.Shutdown(syncSvc, mailSvc, st); err != nil {
+		if err := services.Shutdown(syncSvc, mailSvc, st, actionSvc); err != nil {
 			log.Printf("temail: shutdown incomplete: %v", err)
 		}
 	})

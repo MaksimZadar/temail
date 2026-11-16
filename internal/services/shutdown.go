@@ -14,13 +14,22 @@ import (
 //  1. Stop the sync. Its writes go to the cache.
 //  2. Close the mail service: refuse new calls, cancel running ones, close the
 //     Bridge session and wait for in-flight calls (their writes go to the cache).
-//  3. Close the cache, but only if both steps finished. If a run or a read is
-//     still going, the cache stays open and the error says so, rather than
-//     letting a write hit a closed database.
-func Shutdown(syncSvc *SyncService, mailSvc *MailService, st store.Store) error {
+//  3. Close the action service: refuse new calls, wait for in-flight writes, close
+//     its Writer connections and the audit log (its verified writes go to the
+//     cache).
+//  4. Close the cache, but only if all steps finished. If a run, a read or a
+//     write is still going, the cache stays open and the error says so, rather
+//     than letting a write hit a closed database.
+func Shutdown(syncSvc *SyncService, mailSvc *MailService, st store.Store, actionSvcs ...*ActionService) error {
 	syncErr := syncSvc.Stop()
 	mailErr := mailSvc.shutdown()
-	if err := errors.Join(syncErr, mailErr); err != nil {
+	var actionErr error
+	for _, a := range actionSvcs {
+		if a != nil {
+			actionErr = errors.Join(actionErr, a.shutdown())
+		}
+	}
+	if err := errors.Join(syncErr, mailErr, actionErr); err != nil {
 		log.Printf("temail: not closing the cache: %v", err)
 		return fmt.Errorf("cache left open: %w", err)
 	}

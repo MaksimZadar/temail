@@ -12,6 +12,14 @@ import (
 // wantBound is the complete list of methods the webview can call. Adding a
 // bound method means updating this list and docs/ARCHITECTURE.md §3.3, which
 // is deliberate: every entry is a trust boundary.
+//
+// ActionService is the one intentional exception to the read-only rule: Apply,
+// Undo, UndoLast and Recent are mailbox writes / audit reads. They are safe
+// because every write goes through internal/actions, which only accepts the
+// allowlisted v1 action types, resolves UIDs from the cache (never from the
+// frontend), applies reversible recipes with post-write verification, and
+// records metadata only in audit.db. v1 has no permanent delete, no label
+// create/rename and no drafts.
 var wantBound = map[string][]string{
 	"SetupService": {
 		"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert",
@@ -25,6 +33,9 @@ var wantBound = map[string][]string{
 	"LLMService": {
 		"DeleteProvider", "ListModels", "ListProviders", "SaveProvider", "SetDefaultProvider", "TestProvider",
 	},
+	"ActionService": {
+		"Apply", "Recent", "Undo", "UndoLast",
+	},
 }
 
 // lifecycle methods are called by Wails, not bound to the frontend.
@@ -35,10 +46,11 @@ var secretField = regexp.MustCompile(`(?i)password|passwd|secret|token|apikey|ap
 
 func boundServices() map[string]reflect.Type {
 	return map[string]reflect.Type{
-		"SetupService": reflect.TypeOf(&SetupService{}),
-		"MailService":  reflect.TypeOf(&MailService{}),
-		"SyncService":  reflect.TypeOf(&SyncService{}),
-		"LLMService":   reflect.TypeOf(&LLMService{}),
+		"SetupService":  reflect.TypeOf(&SetupService{}),
+		"MailService":   reflect.TypeOf(&MailService{}),
+		"SyncService":   reflect.TypeOf(&SyncService{}),
+		"LLMService":    reflect.TypeOf(&LLMService{}),
+		"ActionService": reflect.TypeOf(&ActionService{}),
 	}
 }
 
@@ -64,6 +76,8 @@ func TestBoundMethodsAreReadOnlyByName(t *testing.T) {
 	// A name check is a tripwire, not a proof. The mailbox-write verbs must not
 	// appear anywhere. LLMService may change its own config (save, delete and
 	// default a provider), but it must not reach the mailbox or send mail.
+	// ActionService is the intentional write service; its write path is the
+	// allowlisted internal/actions executor, covered by actions' own tests.
 	mailboxWrites := regexp.MustCompile(`(?i)send|move|flag|expunge|append|smtp|draft|archive`)
 	strict := regexp.MustCompile(`(?i)send|delete|move|flag|store|expunge|append|smtp|llm|draft|archive`)
 	for name, typ := range boundServices() {
@@ -123,10 +137,11 @@ func checkNoSecretFields(t *testing.T, where string, typ reflect.Type, seen map[
 // wailsCtxMethods take the Wails call context first. It is not visible to
 // JavaScript; it ends when the call is cancelled or the app shuts down.
 var wailsCtxMethods = map[string][]string{
-	"SetupService": {"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert"},
-	"MailService":  {"CacheInfo", "GetAttachment", "GetMessage", "ListMailboxes", "ListMessages"},
-	"SyncService":  {},
-	"LLMService":   {"ListModels", "TestProvider"},
+	"SetupService":  {"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert"},
+	"MailService":   {"CacheInfo", "GetAttachment", "GetMessage", "ListMailboxes", "ListMessages"},
+	"SyncService":   {},
+	"LLMService":    {"ListModels", "TestProvider"},
+	"ActionService": {"Apply", "Recent", "Undo", "UndoLast"},
 }
 
 func TestBoundMethodsTakeWailsContext(t *testing.T) {
