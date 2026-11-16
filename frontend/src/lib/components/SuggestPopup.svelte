@@ -19,7 +19,14 @@
   const s = suggest;
   const t = $derived(s.current);
   const r = $derived(s.currentResult);
-  const labels = $derived(r?.ok ? (r.labels ?? []) : []);
+  const labels = $derived(s.ordered);
+  const nFolders = $derived(labels.filter((l) => l.target === "folder").length);
+  const sections = $derived(
+    [
+      { id: "folders", title: "Folders", from: 0, to: nFolders },
+      { id: "labels", title: "Labels", from: nFolders, to: labels.length },
+    ].filter((g) => g.to > g.from),
+  );
   const ticked = $derived(s.tickedCount);
   const level = (c: number): number => (c >= 0.8 ? 3 : c >= 0.5 ? 2 : 1);
   const providerName = $derived(
@@ -232,65 +239,77 @@
               tabindex="0"
               bind:this={list}
             >
-              {#each labels as l, i (l.name)}
-                {@const on = s.isTicked(t.mid, l.name)}
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <li
-                  id="sg-l{i}"
-                  role="option"
-                  aria-selected={on}
-                  class:active={i === s.cursor}
-                  onclick={() => {
-                    s.cursor = i;
-                    s.toggle(t.mid, l.name);
-                  }}
-                  onmousemove={() => (s.cursor = i)}
-                >
-                  <span class="box" class:on aria-hidden="true"
-                    >{#if on}✓{/if}</span
-                  >
-                  <span class="main">
-                    <span class="line">
-                      <span class="name">{l.name}</span>
-                      {#if l.target === "folder"}<span
-                          class="chip folder"
-                          title="A folder with this name exists. Accepting moves the message to it (undo available)."
-                          ><svg
-                            viewBox="0 0 16 16"
-                            width="12"
-                            height="12"
-                            aria-hidden="true"
-                            ><path
-                              d="M1.5 3.5h4l1.5 1.5h7.5v7.5h-13z"
-                              fill="none"
-                              stroke="currentColor"
-                              stroke-width="1.3"
-                              stroke-linejoin="round"
-                            /></svg
-                          >move to folder</span
-                        >{:else if l.target === "new" || (!l.target && !l.existing)}<span
-                          class="new"
-                          title="Creates a new label on Proton (cannot be undone)"
-                          >new</span
-                        >{:else}<span
-                          class="chip"
-                          title="Adds this existing label to the message"
-                          >add label</span
-                        >{/if}
-                      <span
-                        class="conf"
-                        title={confidenceText(l.confidence)}
-                        aria-hidden="true"
+              {#each sections as g (g.id)}
+                <li role="group" aria-labelledby="sg-h-{g.id}" class="sec">
+                  <div class="sh" id="sg-h-{g.id}">
+                    {g.title}<span class="n">{g.to - g.from}</span>
+                  </div>
+                  <ul role="presentation">
+                    {#each labels.slice(g.from, g.to) as l, j (l.name)}
+                      {@const i = g.from + j}
+                      {@const on = s.isTicked(t.mid, l.name)}
+                      <!-- svelte-ignore a11y_click_events_have_key_events -->
+                      <li
+                        id="sg-l{i}"
+                        role="option"
+                        aria-selected={on}
+                        class:active={i === s.cursor}
+                        onclick={() => {
+                          s.cursor = i;
+                          s.toggle(t.mid, l.name);
+                        }}
+                        onmousemove={() => (s.cursor = i)}
                       >
-                        {#each [1, 2, 3] as n (n)}<i
-                            class:fill={n <= level(l.confidence)}
-                          ></i>{/each}
-                      </span>
-                      <span class="sr-only">{confidenceText(l.confidence)}</span
-                      >
-                    </span>
-                    {#if l.reason}<span class="reason">{l.reason}</span>{/if}
-                  </span>
+                        <span class="box" class:on aria-hidden="true"
+                          >{#if on}✓{/if}</span
+                        >
+                        <span class="main">
+                          <span class="line">
+                            <span class="name">{l.name}</span>
+                            {#if l.target === "folder"}<span
+                                class="chip folder"
+                                title="A folder with this name exists. Accepting moves the message to it (undo available)."
+                                ><svg
+                                  viewBox="0 0 16 16"
+                                  width="12"
+                                  height="12"
+                                  aria-hidden="true"
+                                  ><path
+                                    d="M1.5 3.5h4l1.5 1.5h7.5v7.5h-13z"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="1.3"
+                                    stroke-linejoin="round"
+                                  /></svg
+                                >move to folder</span
+                              >{:else if l.target === "new" || (!l.target && !l.existing)}<span
+                                class="new"
+                                title="Creates a new label on Proton (cannot be undone)"
+                                >new</span
+                              >{:else}<span
+                                class="chip"
+                                title="Adds this existing label to the message"
+                                >add label</span
+                              >{/if}
+                            <span
+                              class="conf"
+                              title={confidenceText(l.confidence)}
+                              aria-hidden="true"
+                            >
+                              {#each [1, 2, 3] as n (n)}<i
+                                  class:fill={n <= level(l.confidence)}
+                                ></i>{/each}
+                            </span>
+                            <span class="sr-only"
+                              >{confidenceText(l.confidence)}</span
+                            >
+                          </span>
+                          {#if l.reason}<span class="reason">{l.reason}</span
+                            >{/if}
+                        </span>
+                      </li>
+                    {/each}
+                  </ul>
                 </li>
               {/each}
             </ul>
@@ -525,14 +544,44 @@
   .labels:focus-visible {
     outline-offset: 2px;
   }
-  .labels li {
+  .sec {
+    list-style: none;
+  }
+  .sec + .sec {
+    margin-top: 0.3rem;
+    padding-top: 0.2rem;
+    border-top: 1px solid var(--line);
+  }
+  .sec ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .sh {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0.55rem 0.1rem;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .sh .n {
+    padding: 0 0.35rem;
+    background: var(--accent-soft);
+    border-radius: 999px;
+    letter-spacing: 0;
+  }
+  .labels li[role="option"] {
     display: flex;
     gap: 0.6rem;
     padding: 0.45rem 0.55rem;
     border-radius: 6px;
     cursor: pointer;
   }
-  .labels li.active {
+  .labels li[role="option"].active {
     background: var(--sel-bg);
   }
   .box {
