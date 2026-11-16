@@ -2,10 +2,7 @@ package services
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -397,12 +394,10 @@ func (s *SyncService) run(ctx context.Context, cancel context.CancelFunc, acct c
 	}
 }
 
-// credsKey identifies the credentials for the auth latch: a SHA-256 over the
-// connection settings and the password. The password is never stored or logged.
+// credsKey identifies the credentials for the auth latch. It is the shared key
+// from internal/sync, so actions and every sync login path latch each other.
 func credsKey(acct config.BridgeAccount, pw string) string {
-	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%d\x00%s\x00%s\x00%s", acct.Host, acct.IMAPPort, acct.Username, acct.CertFingerprint, pw)
-	return hex.EncodeToString(h.Sum(nil))
+	return mailsync.CredsKey(acct, pw)
 }
 
 // newMailWatcher creates the watcher that runs after the initial sync. It uses

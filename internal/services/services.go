@@ -1,12 +1,15 @@
 // Package services is the thin Wails layer between the webview and the Go
-// packages. Every exported method of the three services is bound to the
-// frontend and is callable by any JavaScript in the window. Business logic
-// lives in internal/bridge, internal/mail, internal/store, internal/sync and
-// internal/config; this package only validates arguments, shapes results for
-// JSON and emits events. See README.md and docs/ARCHITECTURE.md §3.3.
+// packages. Every exported method of the services is bound to the frontend and
+// is callable by any JavaScript in the window. Business logic lives in
+// internal/bridge, internal/mail, internal/store, internal/sync,
+// internal/actions and internal/config; this package only validates arguments,
+// shapes results for JSON and emits events. See README.md and
+// docs/ARCHITECTURE.md §3.3.
 //
 // Rules that every bound method follows:
-//   - Read-only against the mailbox. No SMTP, no LLM, no flag or move writes.
+//   - Read-only against the mailbox, except ActionService: its Apply, Undo,
+//     UndoLast and Recent reach the allowlisted, verified recipes in
+//     internal/actions. No SMTP, no LLM write.
 //   - Never returns a password, API key or any other secret. The Bridge
 //     password flows from the frontend to Go only in SetupService.SaveAccount.
 //   - Never logs passwords, and never puts one in an error or an event.
