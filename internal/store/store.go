@@ -117,6 +117,17 @@ type FlagUpdate struct {
 	Flags []string
 }
 
+// ActionUpdate is the cache effect of one verified action on one message. Empty
+// Mailbox fields mean no placement change; nil Flags means the flags did not
+// change. A move sets RemoveMailbox and AddMailbox to different mailboxes.
+type ActionUpdate struct {
+	MID           string
+	RemoveMailbox string
+	AddMailbox    string
+	AddUID        uint32
+	Flags         []string
+}
+
 // MailboxCounts is the cached message and body count of one mailbox.
 type MailboxCounts struct {
 	Mailbox  string
@@ -176,6 +187,14 @@ type Store interface {
 	// UpdateFlags sets the flags of the listed messages of one epoch in one
 	// transaction. Unknown UIDs are ignored.
 	UpdateFlags(ctx context.Context, account, mailbox string, uidValidity uint32, updates []FlagUpdate) error
+	// FlagsOfMessages returns the cached global flags of many messages, keyed
+	// by mid. Messages without a cached row are absent.
+	FlagsOfMessages(ctx context.Context, account string, mids []string) (map[string][]string, error)
+	// ApplyActionUpdates applies the cache effects of a verified action batch in
+	// one transaction, so membership counters (kept by triggers) stay consistent.
+	// A missing mailbox is ErrNotFound; a message that vanished during the write
+	// is skipped.
+	ApplyActionUpdates(ctx context.Context, account string, updates []ActionUpdate) error
 
 	// ListMessages returns headers of one mailbox, newest first.
 	ListMessages(ctx context.Context, account, mailbox string, opts ListOptions) ([]model.MessageHeader, error)

@@ -78,38 +78,49 @@ func (c *imapClient) Connect(ctx context.Context, acct config.BridgeAccount, pas
 	if err := c.Close(); err != nil {
 		return fmt.Errorf("close previous connection: %w", err)
 	}
-	if err := validateAccount(acct); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	cl, err := dialBridge(ctx, acct, c.unilateral())
+	cl, err := connectBridge(ctx, acct, password, c.unilateral())
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
 	c.cl = cl
 	c.mu.Unlock()
+	return nil
+}
 
+// connectBridge validates the account, dials Bridge with the pin check, and logs
+// in. It is shared by the read-only Client and the write-capable Writer, so both
+// follow the same TLS and login rules. On failure the connection is closed and
+// the error never contains the password.
+func connectBridge(ctx context.Context, acct config.BridgeAccount, password string, unilateral *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
+	if err := validateAccount(acct); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	cl, err := dialBridge(ctx, acct, unilateral)
+	if err != nil {
+		return nil, err
+	}
 	stop := context.AfterFunc(ctx, func() { _ = cl.Close() })
 	err = cl.Login(acct.Username, password).Wait()
 	stop()
 	if err != nil {
-		_ = c.Close()
+		_ = cl.Close()
 		if cerr := ctx.Err(); cerr != nil {
-			return cerr
+			return nil, cerr
 		}
 		// The error text is the server's; the password is never included.
 		var imapErr *imap.Error
 		if errors.As(err, &imapErr) {
 			// The server answered NO or BAD: a credential problem, not a dropped connection.
-			return fmt.Errorf("%w: log in to Bridge as %s: %w", ErrAuthFailed, acct.Username, err)
+			return nil, fmt.Errorf("%w: log in to Bridge as %s: %w", ErrAuthFailed, acct.Username, err)
 		}
-		return fmt.Errorf("log in to Bridge as %s: %w", acct.Username, err)
+		return nil, fmt.Errorf("log in to Bridge as %s: %w", acct.Username, err)
 	}
-	return nil
+	return cl, nil
 }
 
 // validateAccount checks the parts of an account that Connect depends on and

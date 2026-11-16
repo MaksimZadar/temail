@@ -1,8 +1,9 @@
-// Package mail is the read-only IMAP client for Proton Bridge. It returns the
-// plain types in internal/model and never changes mailbox state: the Client
-// interface has no write methods, and the implementation issues only LOGIN,
-// LIST, STATUS, EXAMINE (read-only SELECT), UID SEARCH, UID FETCH with
-// BODY.PEEK, and LOGOUT/close. See README.md.
+// Package mail is the IMAP client for Proton Bridge. Client is read-only: it
+// returns the plain types in internal/model and never changes mailbox state.
+// Writer is a separate, write-capable type (see writer.go): the Client interface
+// has no write methods, and the implementation issues only LOGIN, LIST, STATUS,
+// EXAMINE (read-only SELECT), UID SEARCH, UID FETCH with BODY.PEEK, and
+// LOGOUT/close. See README.md.
 package mail
 
 import (
