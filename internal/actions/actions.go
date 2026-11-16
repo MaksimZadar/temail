@@ -16,6 +16,7 @@ import (
 
 	"github.com/MaksimZadar/temail/internal/config"
 	"github.com/MaksimZadar/temail/internal/mail"
+	"github.com/MaksimZadar/temail/internal/model"
 	"github.com/MaksimZadar/temail/internal/store"
 	mailsync "github.com/MaksimZadar/temail/internal/sync"
 )
@@ -110,6 +111,9 @@ type CacheStore interface {
 	MembershipOfMessages(ctx context.Context, account string, mids []string) (map[string][]store.Placement, error)
 	FlagsOfMessages(ctx context.Context, account string, mids []string) (map[string][]string, error)
 	ApplyActionUpdates(ctx context.Context, account string, updates []store.ActionUpdate) error
+	// UpsertMailboxes records a mailbox created by an action, so a following
+	// add_label can resolve it before the next sync lists it.
+	UpsertMailboxes(ctx context.Context, account string, boxes []model.Mailbox) error
 }
 
 // Writer is the write-capable connection. mail.Writer satisfies it. Every
@@ -119,6 +123,7 @@ type CacheStore interface {
 type Writer interface {
 	Connect(ctx context.Context, acct config.BridgeAccount, password string) error
 	StoreFlags(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, add, remove []string) error
+	CreateMailbox(ctx context.Context, name string) error
 	Move(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (mail.CopyUID, error)
 	Copy(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (mail.CopyUID, error)
 	ExpungeDeleted(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) error
@@ -259,6 +264,84 @@ func Validate(a Action) error {
 
 // ErrInvalidAction marks an input that the action layer refuses.
 var ErrInvalidAction = errors.New("invalid action")
+
+// AuditTypeCreateLabel is the audit-row type for a created label. It is not an
+// Action type (Validate rejects it) and it has no inverse, so undo never
+// removes the mailbox: only the add_label rows of the accepted messages are
+// undoable.
+const AuditTypeCreateLabel = "create_label"
+
+// reservedLabelNames are system folder names that must never become labels.
+var reservedLabelNames = map[string]bool{
+	"inbox": true, "sent": true, "drafts": true, "trash": true, "spam": true,
+	"archive": true, "all mail": true, "starred": true, "important": true,
+	"folders": true, "labels": true, "recovered messages": true,
+}
+
+// CreateLabel creates the Proton label Labels/<name>, verifies it with LIST,
+// records it in the cache and audits the creation. The audit row is
+// non-undoable: undo removes labels from messages, never the mailbox itself.
+func (e *Executor) CreateLabel(ctx context.Context, name string) error {
+	if err := validNewLabel(name); err != nil {
+		return fmt.Errorf("%w: create_label: %v", ErrInvalidAction, err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.connect(ctx); err != nil {
+		return err
+	}
+	full := "Labels/" + name
+	if err := e.w.CreateMailbox(ctx, full); err != nil {
+		e.noteWriteErr(err)
+		return err
+	}
+	// A following add_label resolves Labels/<name> from the cache. Add the row
+	// now; the next sync fills in its counts and epoch.
+	if err := e.st.UpsertMailboxes(ctx, e.opts.Account, []model.Mailbox{{
+		Name: full, DisplayName: name, Kind: model.KindLabel,
+	}}); err != nil {
+		return fmt.Errorf("record label %q in the cache: %w", name, err)
+	}
+	params, err := json.Marshal(Params{Label: name})
+	if err != nil {
+		return fmt.Errorf("encode create_label params: %w", err)
+	}
+	if _, err := e.audit.Insert(ctx, Entry{
+		TS:         e.opts.Now(),
+		Account:    e.opts.Account,
+		Type:       AuditTypeCreateLabel,
+		ParamsJSON: string(params),
+		Verified:   true,
+		BatchID:    e.newBatchID(),
+	}); err != nil {
+		return fmt.Errorf("audit create_label %q: %w", name, err)
+	}
+	return nil
+}
+
+// validNewLabel applies the write-boundary rules for a new label name. The
+// suggestion layer applies the same rules; this is the second check.
+func validNewLabel(name string) error {
+	if err := validLabel(name); err != nil {
+		return err
+	}
+	if len([]rune(name)) > 64 {
+		return errors.New("label name is longer than 64 characters")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return errors.New("label name must not contain a path separator")
+	}
+	if strings.TrimSpace(name) != name {
+		return errors.New("label name must not start or end with a space")
+	}
+	if strings.Trim(name, ".") == "" {
+		return errors.New("label name must not be only dots")
+	}
+	if reservedLabelNames[strings.ToLower(name)] {
+		return errors.New("label name is a system folder name")
+	}
+	return nil
+}
 
 func validMailbox(name string) error {
 	if strings.TrimSpace(name) == "" {

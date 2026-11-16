@@ -134,7 +134,7 @@ func TestStopTimeoutIsReportedAndKeepsCacheOpen(t *testing.T) {
 
 	mailSvc := NewMailService(newFakeStore(), fx.cfg, fx.svc.sec, fx.f.new)
 	rec := &closeRecorder{Store: fx.st}
-	if err := Shutdown(fx.svc, mailSvc, rec); err == nil {
+	if err := Shutdown(fx.svc, mailSvc, rec, nil); err == nil {
 		t.Fatal("Shutdown must fail while the sync is stuck")
 	}
 	if rec.closed {
@@ -146,7 +146,7 @@ func TestStopTimeoutIsReportedAndKeepsCacheOpen(t *testing.T) {
 	if fx.svc.Status().StopTimedOut {
 		t.Fatal("StopTimedOut must clear once the run has ended")
 	}
-	if err := Shutdown(fx.svc, mailSvc, rec); err != nil {
+	if err := Shutdown(fx.svc, mailSvc, rec, nil); err != nil {
 		t.Fatalf("Shutdown after the run ended: %v", err)
 	}
 	if !rec.closed {

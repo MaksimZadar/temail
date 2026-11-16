@@ -14,12 +14,14 @@ import (
 )
 
 type fakeActionEngine struct {
-	mu      sync.Mutex
-	applied []actions.Action
-	res     actions.Result
-	err     error
-	undoID  int64
-	recent  []actions.Entry
+	mu        sync.Mutex
+	applied   []actions.Action
+	res       actions.Result
+	err       error
+	createErr error
+	created   []string
+	undoID    int64
+	recent    []actions.Entry
 }
 
 func (f *fakeActionEngine) Apply(_ context.Context, a actions.Action) (actions.Result, error) {
@@ -46,6 +48,13 @@ func (f *fakeActionEngine) Recent(context.Context, int) ([]actions.Entry, error)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.recent, f.err
+}
+
+func (f *fakeActionEngine) CreateLabel(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.created = append(f.created, name)
+	return f.createErr
 }
 
 func (f *fakeActionEngine) last() actions.Action {

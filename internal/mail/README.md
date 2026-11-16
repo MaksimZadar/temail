@@ -38,6 +38,10 @@ the recipes and the expunge rule.
 - `Move(mailbox, uids, target)`: `UID MOVE`, returning COPYUID (source/dest UIDs
   and the target UIDVALIDITY) when the server reports it.
 - `Copy(mailbox, uids, target)`: `UID COPY`, returning COPYUID.
+- `CreateMailbox(name)`: `CREATE` then `LIST`; success is reported only when the
+  listing contains the exact name. It is used for one case, creating a Proton
+  label as `Labels/<name>` when the user accepts a suggested new label. The
+  caller validates the name; this method refuses an empty or control-laden one.
 - `ExpungeDeleted(mailbox, uids)`: `UID STORE +\Deleted` then `UID EXPUNGE` for
   exactly those UIDs. It refuses with `ErrExpungeUnsupported` when the server has
   neither UIDPLUS nor IMAP4rev2, because a plain `EXPUNGE` would remove every

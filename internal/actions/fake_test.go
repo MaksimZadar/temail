@@ -193,6 +193,21 @@ func (f *fakeWriter) StoreFlags(ctx context.Context, mailbox string, uidValidity
 	return nil
 }
 
+func (f *fakeWriter) CreateMailbox(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.connected {
+		return mail.ErrNotConnected
+	}
+	if f.boxes[name] {
+		return fmt.Errorf("mailbox %s already exists", name)
+	}
+	f.boxes[name] = true
+	f.epoch[name] = 1
+	f.calls = append(f.calls, "CREATE "+name)
+	return nil
+}
+
 func (f *fakeWriter) Move(_ context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (mail.CopyUID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -402,6 +417,12 @@ func (f *fakeWriter) connectCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.connects
+}
+
+func (f *fakeWriter) hasMailbox(name string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.boxes[name]
 }
 
 func (f *fakeWriter) flagsOf(mid string, flag string) bool {

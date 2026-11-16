@@ -14,7 +14,14 @@ One `Action` is one batch: one type, typed params, and up to `MaxBatch` (100)
 stable message ids (`mid`, the Proton internal id from `X-Pm-Internal-Id`). The
 current UID of every message is resolved from the cache at apply time; a UID or
 epoch from the frontend is never trusted. There is no permanent delete, no label
-create/rename and no draft handling in this lane.
+rename or deletion, and no draft handling in this lane.
+
+`CreateLabel(name)` is the one non-message write. It creates `Labels/<name>` for
+an accepted suggestion, verifies the mailbox with LIST, inserts the cache row
+(so a following `add_label` resolves it before the next sync), and audits a
+`create_label` row. That row has no inverse: undo removes the label from the
+messages, never the mailbox. Names are re-checked at this boundary: 1–64
+characters, no path separators, no control characters, not a system folder name.
 
 `Result{Applied []mid, Failed []Failure{MID, Mailbox, Message}, BatchID,
 Entries []ResultEntry{MID, AuditID, Undoable}}`. Failures are visible per
@@ -123,7 +130,8 @@ scoped to the executor's account.
 Inverses: `mark_read ↔ mark_unread`, `star ↔ unstar`,
 `move/archive/trash/spam/not_spam → move` back to the before-folder,
 `add_label ↔ remove_label`. An inverse is recorded only when the before-state
-differed: a no-op has no inverse.
+differed: a no-op has no inverse. `create_label` rows have no inverse and are
+reported as not undoable.
 
 Undo resolves the message's **current** UIDs from the cache by mid and runs the
 inverse through the same verified write path. Before writing it compares the

@@ -289,6 +289,48 @@ Tests (`actions_test.go`) use a fake engine: DTO mapping and validation, undo,
 recent, the coalesced event, shutdown refusal, and camelCase/no-content JSON.
 The executor itself is covered in `internal/actions`.
 
+### SuggestionService (phase P6)
+
+Bound to the frontend, but it owns no mailbox write of its own: it starts LLM
+jobs and sends accepted labels through `ActionService`. The per-email prompt and
+validation live in `internal/suggest`.
+
+- `Suggest(ctx, messageIds, providerName)` validates and dedupes up to 25 Proton
+  mids and returns a `jobId` immediately. The job runs on the service's own
+  context, so returning from the bound call does not cancel it. More than 25 ids
+  is `ErrInvalidInput`. An empty provider name uses the config default; with no
+  default an enabled local provider is preferred, then the first enabled one. A
+  disabled cloud provider is refused with `cloud_disabled:` (`ErrSuggestCloudDisabled`)
+  before any content is sent. An identical batch that is already running returns
+  its id instead of starting a second job.
+- Each email gets one structured call: the system prompt carries the task, the
+  existing label/folder names, and the rule that the email is untrusted data;
+  the user message is one delimited `<email-data>` block (headers and plain
+  text, capped at 16000 characters, HTML converted to text when there is no
+  text part). At most two calls run at once and each has a 60 s timeout.
+- `Status(jobId)` returns `{jobId, provider, state, total, completed, failed,
+  started, results[]}` for a late-joining UI. `Cancel(jobId)` cancels the job
+  and discards its results. Results are memory only: a new job replaces the old
+  one, and app exit discards everything. Nothing suggestion-related is cached.
+- `ApplySuggestions(ctx, jobId, accepted)` accepts only labels the job itself
+  proposed for that message; anything else is `ErrInvalidInput`. A suggested
+  label that is not in the cached mailbox list is created first (`Labels/<name>`
+  via `mail.Writer.CreateMailbox`, verified with LIST, added to the cache and
+  audited as a non-undoable `create_label` row). Then `add_label` runs once per
+  label over all accepting mids, through the same verified action engine. The
+  result mirrors `ActionResultDTO` and adds `batchIds`, `auditIds` and
+  `createdLabels`; per-message failures carry `create_failed` or `apply_failed`.
+- Events: `suggest:result {jobId, mid, ok, labels[{name, confidence, reason,
+  existing}], summary, error, code}` per email, and `suggest:done {jobId, total,
+  failed}` once per job. Failure codes are stable (`not_cached`, `timeout`,
+  `invalid_output`, `cloud_disabled`, `cancelled`, `cache_error`, the llm
+  categories, and `create_failed`/`apply_failed` in the apply result). Error
+  text is fixed and never contains a prompt, body or key.
+- Tests (`suggest_test.go`) use a fake per-email call and the action fake: the
+  event stream, batch cap/dedupe, disabled-cloud refusal, per-email failure
+  isolation, timeout, cancel, concurrency 2, apply with label creation, the
+  allowlist, the new-label cap and the create/apply failure codes.
+
 ## Injection
 
 Each service takes interfaces, so tests use fakes:
@@ -297,13 +339,16 @@ Each service takes interfaces, so tests use fakes:
 - `SecretStore` (the `secrets.Store` methods plus `Probe`): `*secrets.KeyringStore`.
 - `ClientFactory` (`func() mail.Client`): `mail.NewClient`.
 - `func() mail.Writer`: `mail.NewWriter` for `ActionService`.
+- `*LLMService`: `SuggestionService` reuses `clientFor`, so provider resolution,
+  the key binding and the cloud gate follow the LLM rules.
 - `Emitter` (`Emit`): `app.Event`.
 - `store.Store`: the SQLite cache. Tests use a fake for `MailService` and a real
   SQLite file in `t.TempDir()` for `SyncService`.
 
 `main.go` builds the wiring and registers the services with `app.RegisterService`.
-The shutdown hook stops the sync, mail reads and action writes and closes the
-cache. The services shut down after the hook runs.
+One `LLMService` is shared by the frontend bindings and `SuggestionService`. The
+shutdown hook stops the sync, cancels suggestion jobs, stops mail reads and
+action writes, and closes the cache. The services shut down after the hook runs.
 
 ## Tests
 
