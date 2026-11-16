@@ -23,6 +23,11 @@ var ErrExpungeUnsupported = errors.New("the server does not support UID EXPUNGE 
 // not do for an archive or move, so the writer refuses instead.
 var ErrMoveUnsupported = errors.New("the server does not support MOVE")
 
+// ErrEpochChanged means the mailbox's UIDVALIDITY is not the one the caller
+// cached. UIDs from another epoch name different messages, so the operation is
+// refused before anything is written. The caller must resync the mailbox.
+var ErrEpochChanged = errors.New("mailbox UIDVALIDITY changed")
+
 // CopyUID is the UIDPLUS answer to COPY or MOVE. DestUIDs[i] is the UID that
 // SourceUIDs[i] got in the target mailbox. UIDValidity is the target's epoch.
 // Empty DestUIDs means the server did not report COPYUID.
@@ -37,9 +42,11 @@ type CopyUID struct {
 // methods, and this interface is reviewed as the one place where temail changes
 // mailbox state (docs/ARCHITECTURE.md §3.3, §7).
 //
-// Every method selects the mailbox it needs and runs under one operation lock,
-// so calls are serialised. Cancelling the context of a call closes the
-// connection; call Connect again afterwards.
+// Every method selects the mailbox it needs (or reuses the current selection)
+// and runs under one operation lock, so calls are serialised. A method whose
+// uidValidity is non-zero refuses with ErrEpochChanged when the server's
+// UIDVALIDITY differs, before any write. Cancelling the context of a call
+// closes the connection; call Connect again afterwards.
 type Writer interface {
 	// Connect dials Bridge with the same pin and login rules as Client.Connect.
 	Connect(ctx context.Context, acct config.BridgeAccount, password string) error
@@ -50,30 +57,36 @@ type Writer interface {
 	// StoreFlags adds and removes flags on uids in mailbox. Flags are global per
 	// message in Proton, so \Seen and \Flagged may be set from any mailbox the
 	// message is in.
-	StoreFlags(ctx context.Context, mailbox string, uids []uint32, add, remove []string) error
+	StoreFlags(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, add, remove []string) error
 
 	// Move runs UID MOVE from mailbox to target and returns the COPYUID data when
 	// the server reports it.
-	Move(ctx context.Context, mailbox string, uids []uint32, target string) (CopyUID, error)
+	Move(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (CopyUID, error)
 
 	// Copy runs UID COPY from mailbox to target and returns the COPYUID data when
 	// the server reports it.
-	Copy(ctx context.Context, mailbox string, uids []uint32, target string) (CopyUID, error)
+	Copy(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (CopyUID, error)
 
 	// ExpungeDeleted sets \Deleted on uids in mailbox and then runs UID EXPUNGE
 	// for exactly those UIDs. It must only be called for a Labels/<name> mailbox
 	// or Trash/Drafts, never to complete a move or archive (internal/actions
 	// enforces that, and a static test checks it).
-	ExpungeDeleted(ctx context.Context, mailbox string, uids []uint32) error
+	ExpungeDeleted(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) error
 
 	// SearchInternalID returns the UIDs in mailbox whose X-Pm-Internal-Id header
 	// equals internalID. It is the verification path when COPYUID is missing.
-	SearchInternalID(ctx context.Context, mailbox, internalID string) ([]uint32, error)
+	SearchInternalID(ctx context.Context, mailbox string, uidValidity uint32, internalID string) ([]uint32, error)
+
+	// FetchInternalIDs reads the Proton internal id of each UID from
+	// X-Pm-Internal-Id, falling back to the Message-ID form. A UID with neither
+	// header is absent from the map. It is the pre-write identity check for a
+	// MOVE, a COPY and a label expunge.
+	FetchInternalIDs(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) (map[uint32]string, error)
 
 	// FetchFlags returns the flags of the given UIDs. UIDs that are not in the
 	// mailbox are absent from the map. It is used to verify flag writes and to
 	// confirm that a MOVE removed the source UIDs.
-	FetchFlags(ctx context.Context, mailbox string, uids []uint32) (map[uint32][]string, error)
+	FetchFlags(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) (map[uint32][]string, error)
 
 	// Close logs out and closes the connection. Closing an unconnected Writer is
 	// not an error.
@@ -85,6 +98,13 @@ type imapWriter struct {
 	opMu sync.Mutex
 	mu   sync.Mutex
 	cl   *imapclient.Client
+	// sel is the mailbox currently selected on cl, with its epoch and mode.
+	// Reusing a selection is what keeps one action group from re-opening the
+	// same mailbox for every call; in particular it avoids repeated SELECTs of
+	// All Mail.
+	sel         string
+	selValidity uint32
+	selWritable bool
 }
 
 // NewWriter returns an unconnected write-capable client.
@@ -98,6 +118,7 @@ var _ Writer = (*imapWriter)(nil)
 func (w *imapWriter) Connect(ctx context.Context, acct config.BridgeAccount, password string) error {
 	w.opMu.Lock()
 	defer w.opMu.Unlock()
+	w.resetSelection()
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("close previous connection: %w", err)
 	}
@@ -129,7 +150,7 @@ func (w *imapWriter) Capabilities() []string {
 }
 
 // StoreFlags implements Writer.
-func (w *imapWriter) StoreFlags(ctx context.Context, mailbox string, uids []uint32, add, remove []string) error {
+func (w *imapWriter) StoreFlags(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, add, remove []string) error {
 	if mailbox == "" || len(uids) == 0 || (len(add) == 0 && len(remove) == 0) {
 		return errors.New("store flags: mailbox, UIDs and flags are required")
 	}
@@ -138,7 +159,7 @@ func (w *imapWriter) StoreFlags(ctx context.Context, mailbox string, uids []uint
 		return err
 	}
 	defer end()
-	if _, err := selectWritable(cl, mailbox); err != nil {
+	if err := w.selectMailbox(cl, mailbox, uidValidity, true); err != nil {
 		return opErr(ctx, err)
 	}
 	set := uidSetOf(uids)
@@ -156,7 +177,7 @@ func (w *imapWriter) StoreFlags(ctx context.Context, mailbox string, uids []uint
 }
 
 // Move implements Writer.
-func (w *imapWriter) Move(ctx context.Context, mailbox string, uids []uint32, target string) (CopyUID, error) {
+func (w *imapWriter) Move(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (CopyUID, error) {
 	if mailbox == "" || target == "" || len(uids) == 0 {
 		return CopyUID{}, errors.New("move: mailbox, target and UIDs are required")
 	}
@@ -171,7 +192,7 @@ func (w *imapWriter) Move(ctx context.Context, mailbox string, uids []uint32, ta
 		// explicit COPY where that is the right recipe.
 		return CopyUID{}, ErrMoveUnsupported
 	}
-	if _, err := selectWritable(cl, mailbox); err != nil {
+	if err := w.selectMailbox(cl, mailbox, uidValidity, true); err != nil {
 		return CopyUID{}, opErr(ctx, err)
 	}
 	data, err := cl.Move(uidSetOf(uids), target).Wait()
@@ -182,7 +203,7 @@ func (w *imapWriter) Move(ctx context.Context, mailbox string, uids []uint32, ta
 }
 
 // Copy implements Writer.
-func (w *imapWriter) Copy(ctx context.Context, mailbox string, uids []uint32, target string) (CopyUID, error) {
+func (w *imapWriter) Copy(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (CopyUID, error) {
 	if mailbox == "" || target == "" || len(uids) == 0 {
 		return CopyUID{}, errors.New("copy: mailbox, target and UIDs are required")
 	}
@@ -191,7 +212,7 @@ func (w *imapWriter) Copy(ctx context.Context, mailbox string, uids []uint32, ta
 		return CopyUID{}, err
 	}
 	defer end()
-	if _, err := selectWritable(cl, mailbox); err != nil {
+	if err := w.selectMailbox(cl, mailbox, uidValidity, true); err != nil {
 		return CopyUID{}, opErr(ctx, err)
 	}
 	data, err := cl.Copy(uidSetOf(uids), target).Wait()
@@ -202,7 +223,7 @@ func (w *imapWriter) Copy(ctx context.Context, mailbox string, uids []uint32, ta
 }
 
 // ExpungeDeleted implements Writer.
-func (w *imapWriter) ExpungeDeleted(ctx context.Context, mailbox string, uids []uint32) error {
+func (w *imapWriter) ExpungeDeleted(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) error {
 	if mailbox == "" || len(uids) == 0 {
 		return errors.New("expunge deleted: mailbox and UIDs are required")
 	}
@@ -214,7 +235,7 @@ func (w *imapWriter) ExpungeDeleted(ctx context.Context, mailbox string, uids []
 	if !cl.Caps().Has(imap.CapUIDPlus) && !cl.Caps().Has(imap.CapIMAP4rev2) {
 		return ErrExpungeUnsupported
 	}
-	if _, err := selectWritable(cl, mailbox); err != nil {
+	if err := w.selectMailbox(cl, mailbox, uidValidity, true); err != nil {
 		return opErr(ctx, err)
 	}
 	set := uidSetOf(uids)
@@ -232,7 +253,7 @@ func (w *imapWriter) ExpungeDeleted(ctx context.Context, mailbox string, uids []
 }
 
 // SearchInternalID implements Writer.
-func (w *imapWriter) SearchInternalID(ctx context.Context, mailbox, internalID string) ([]uint32, error) {
+func (w *imapWriter) SearchInternalID(ctx context.Context, mailbox string, uidValidity uint32, internalID string) ([]uint32, error) {
 	if mailbox == "" || internalID == "" {
 		return nil, errors.New("search internal id: mailbox and id are required")
 	}
@@ -241,7 +262,7 @@ func (w *imapWriter) SearchInternalID(ctx context.Context, mailbox, internalID s
 		return nil, err
 	}
 	defer end()
-	if _, err := selectReadOnly(cl, mailbox); err != nil {
+	if err := w.selectMailbox(cl, mailbox, uidValidity, false); err != nil {
 		return nil, opErr(ctx, err)
 	}
 	data, err := cl.UIDSearch(&imap.SearchCriteria{
@@ -257,8 +278,48 @@ func (w *imapWriter) SearchInternalID(ctx context.Context, mailbox, internalID s
 	return out, nil
 }
 
+// FetchInternalIDs implements Writer. One FETCH reads both identity headers;
+// BODY.PEEK leaves \Seen unchanged. It selects the mailbox writable, because
+// its callers run a write in the same mailbox immediately afterwards, and the
+// following call then reuses this selection.
+func (w *imapWriter) FetchInternalIDs(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) (map[uint32]string, error) {
+	out := make(map[uint32]string, len(uids))
+	if len(uids) == 0 || mailbox == "" {
+		return out, nil
+	}
+	cl, end, err := w.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer end()
+	if err := w.selectMailbox(cl, mailbox, uidValidity, true); err != nil {
+		return nil, opErr(ctx, err)
+	}
+	opts := &imap.FetchOptions{
+		UID: true,
+		BodySection: []*imap.FetchItemBodySection{{
+			Specifier:    imap.PartSpecifierHeader,
+			HeaderFields: []string{"X-Pm-Internal-Id", "Message-ID"},
+			Peek:         true,
+		}},
+	}
+	bufs, err := cl.Fetch(uidSetOf(uids), opts).Collect()
+	if err != nil {
+		return nil, opErr(ctx, fmt.Errorf("fetch identity from %s: %w", mailbox, err))
+	}
+	for _, buf := range bufs {
+		sec := buf.FindBodySection(opts.BodySection[0])
+		if sec == nil {
+			continue
+		}
+		id, _ := internalIDOf(sec, "")
+		out[uint32(buf.UID)] = id
+	}
+	return out, nil
+}
+
 // FetchFlags implements Writer.
-func (w *imapWriter) FetchFlags(ctx context.Context, mailbox string, uids []uint32) (map[uint32][]string, error) {
+func (w *imapWriter) FetchFlags(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32) (map[uint32][]string, error) {
 	out := make(map[uint32][]string, len(uids))
 	if len(uids) == 0 {
 		return out, nil
@@ -268,7 +329,7 @@ func (w *imapWriter) FetchFlags(ctx context.Context, mailbox string, uids []uint
 		return nil, err
 	}
 	defer end()
-	if _, err := selectReadOnly(cl, mailbox); err != nil {
+	if err := w.selectMailbox(cl, mailbox, uidValidity, false); err != nil {
 		return nil, opErr(ctx, err)
 	}
 	bufs, err := cl.Fetch(uidSetOf(uids), flagFetchOptions()).Collect()
@@ -284,6 +345,7 @@ func (w *imapWriter) FetchFlags(ctx context.Context, mailbox string, uids []uint
 
 // Close implements Writer.
 func (w *imapWriter) Close() error {
+	w.resetSelection()
 	w.mu.Lock()
 	cl := w.cl
 	w.cl = nil
@@ -292,6 +354,49 @@ func (w *imapWriter) Close() error {
 		return nil
 	}
 	return cl.Close()
+}
+
+// resetSelection forgets which mailbox is selected. It is called whenever the
+// connection is opened or closed.
+func (w *imapWriter) resetSelection() {
+	w.mu.Lock()
+	w.sel, w.selValidity, w.selWritable = "", 0, false
+	w.mu.Unlock()
+}
+
+// selectMailbox opens mailbox unless it is already selected with a compatible
+// mode and the same epoch. It checks the caller's cached UIDVALIDITY against
+// the server's and returns ErrEpochChanged on a mismatch, so a stale UID is
+// never used.
+func (w *imapWriter) selectMailbox(cl *imapclient.Client, mailbox string, uidValidity uint32, writable bool) error {
+	w.mu.Lock()
+	reuse := w.sel == mailbox && (!writable || w.selWritable) &&
+		(uidValidity == 0 || w.selValidity == uidValidity)
+	w.mu.Unlock()
+	if reuse {
+		return nil
+	}
+	var (
+		data *imap.SelectData
+		err  error
+	)
+	if writable {
+		data, err = selectWritable(cl, mailbox)
+	} else {
+		data, err = selectReadOnly(cl, mailbox)
+	}
+	if err != nil {
+		w.resetSelection()
+		return err
+	}
+	w.mu.Lock()
+	w.sel, w.selValidity, w.selWritable = mailbox, data.UIDValidity, writable
+	w.mu.Unlock()
+	if uidValidity != 0 && data.UIDValidity != uidValidity {
+		w.resetSelection()
+		return fmt.Errorf("%w: %s is now UIDVALIDITY %d, the cache has %d", ErrEpochChanged, mailbox, data.UIDValidity, uidValidity)
+	}
+	return nil
 }
 
 // begin takes the operation lock and returns the connection. If ctx ends while

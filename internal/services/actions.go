@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -54,18 +55,41 @@ type ActionResultDTO struct {
 	Failed       []ActionFailureDTO `json:"failed"`
 	AppliedCount int                `json:"appliedCount"`
 	FailedCount  int                `json:"failedCount"`
+	// BatchID groups the audit rows of this action.
+	BatchID string `json:"batchId"`
+	// AuditIDs are the audit rows that can be undone; a partial or unverified
+	// message is not listed.
+	AuditIDs []int64 `json:"auditIds"`
+	// Code is a stable outcome code for undo calls: not_undoable, already_undone,
+	// not_found, wrong_account or diverged. It is empty for a normal apply.
+	Code string `json:"code"`
 }
 
-// AuditDTO is one audit row: metadata only, never message content.
+// AuditDTO is one audit row: metadata only, never message content. Recent
+// returns one row per action batch, so Count is the number of messages.
 type AuditDTO struct {
-	ID     int64           `json:"id"`
-	TS     time.Time       `json:"ts"`
-	Type   string          `json:"type"`
-	Params ActionParamsDTO `json:"params"`
-	Count  int             `json:"count"`
-	Error  string          `json:"error"`
-	Undone bool            `json:"undone"`
+	ID       int64           `json:"id"`
+	TS       time.Time       `json:"ts"`
+	Type     string          `json:"type"`
+	Params   ActionParamsDTO `json:"params"`
+	Count    int             `json:"count"`
+	Error    string          `json:"error"`
+	Undone   bool            `json:"undone"`
+	BatchID  string          `json:"batchId"`
+	AuditIDs []int64         `json:"auditIds"`
+	// Code explains why a row cannot be undone: not_undoable, already_undone or
+	// diverged. Empty means Undo(id) will be attempted.
+	Code string `json:"code"`
 }
+
+// Outcome codes returned in ActionResultDTO.Code and AuditDTO.Code.
+const (
+	CodeNotUndoable   = "not_undoable"
+	CodeAlreadyUndone = "already_undone"
+	CodeNotFound      = "not_found"
+	CodeWrongAccount  = "wrong_account"
+	CodeDiverged      = "diverged"
+)
 
 // ActionsDoneEvent is the payload of actions:done.
 type ActionsDoneEvent struct {
@@ -158,6 +182,14 @@ func (s *ActionService) defaultEngine(account string, audit *actions.Audit) (Act
 			return acct, pw, nil
 		},
 		Auth: latch,
+		Resync: func(ctx context.Context, mailboxes []string) {
+			if err := s.st.MarkMailboxesStale(ctx, account, mailboxes); err != nil {
+				log.Printf("actions: mark mailboxes stale: %v", err)
+			}
+			if s.syncSvc != nil {
+				s.syncSvc.kickWatcher()
+			}
+		},
 	})
 }
 
@@ -213,7 +245,12 @@ func (s *ActionService) Undo(ctx context.Context, id int64) (ActionResultDTO, er
 	if len(res.Applied) > 0 || len(res.Failed) > 0 {
 		s.noteDone("undo", res)
 	}
-	return toActionResult(res), err
+	out := toActionResult(res)
+	if code := actionCode(err); code != "" {
+		out.Code = code
+		return out, nil
+	}
+	return out, err
 }
 
 // UndoLast undoes the newest verified action that is not undone yet.
@@ -231,7 +268,12 @@ func (s *ActionService) UndoLast(ctx context.Context) (ActionResultDTO, error) {
 	if len(res.Applied) > 0 || len(res.Failed) > 0 {
 		s.noteDone("undo", res)
 	}
-	return toActionResult(res), err
+	out := toActionResult(res)
+	if code := actionCode(err); code != "" {
+		out.Code = code
+		return out, nil
+	}
+	return out, err
 }
 
 // Recent returns the newest audit rows, newest first. limit defaults to 50 and
@@ -256,12 +298,41 @@ func (s *ActionService) Recent(ctx context.Context, limit int) ([]AuditDTO, erro
 		if e.ParamsJSON != "" {
 			_ = json.Unmarshal([]byte(e.ParamsJSON), &p)
 		}
-		out = append(out, AuditDTO{
+		dto := AuditDTO{
 			ID: e.ID, TS: e.TS, Type: e.Type, Params: p,
-			Count: 1, Error: e.Error, Undone: e.Undone,
-		})
+			Count: e.Count, Error: e.Error, Undone: e.Undone,
+			BatchID: e.BatchID, AuditIDs: e.AuditIDs,
+		}
+		if !e.Undoable {
+			if e.Undone {
+				dto.Code = CodeAlreadyUndone
+			} else {
+				dto.Code = CodeNotUndoable
+			}
+		}
+		out = append(out, dto)
 	}
 	return out, nil
+}
+
+// actionCode maps an undo refusal to a stable DTO code. A mapped error is not
+// returned to the frontend as an error: the code says what happened.
+func actionCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, actions.ErrDiverged):
+		return CodeDiverged
+	case errors.Is(err, actions.ErrAlreadyUndone):
+		return CodeAlreadyUndone
+	case errors.Is(err, actions.ErrAuditNotFound):
+		return CodeNotFound
+	case errors.Is(err, actions.ErrWrongAccount):
+		return CodeWrongAccount
+	case errors.Is(err, actions.ErrNotUndoable):
+		return CodeNotUndoable
+	}
+	return ""
 }
 
 // begin registers one bound call, bounded by actionTimeout and by shutdown.
@@ -444,12 +515,19 @@ func toActionResult(r actions.Result) ActionResultDTO {
 		Failed:       make([]ActionFailureDTO, 0, len(r.Failed)),
 		AppliedCount: len(r.Applied),
 		FailedCount:  len(r.Failed),
+		BatchID:      r.BatchID,
+		AuditIDs:     []int64{},
 	}
 	if out.Applied == nil {
 		out.Applied = []string{}
 	}
 	for _, f := range r.Failed {
 		out.Failed = append(out.Failed, ActionFailureDTO{MID: f.MID, Mailbox: f.Mailbox, Message: f.Message})
+	}
+	for _, e := range r.Entries {
+		if e.Undoable {
+			out.AuditIDs = append(out.AuditIDs, e.AuditID)
+		}
 	}
 	return out
 }

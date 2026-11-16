@@ -21,11 +21,14 @@ type rowState struct {
 	flags      []string
 }
 
-// planItem is one message's write plan inside a group.
+// planItem is one message's write plan inside a group. source is a full cached
+// placement, so every write carries the epoch its UID belongs to.
 type planItem struct {
 	row       *rowState
-	sourceUID uint32
+	source    store.Placement
 	destUID   uint32
+	auditID   int64
+	ambiguous bool
 }
 
 // outcome is one message's result after the write and its verification.
@@ -34,9 +37,15 @@ type outcome struct {
 	mailbox  string
 	verified bool
 	err      error
+	// auditErr is the audit log's wording when the user-facing err is clearer
+	// than "unknown outcome" (a COPY fallback, for example).
+	auditErr error
 	update   store.ActionUpdate
 	after    cachedState
 	inverse  Inverse
+	auditID  int64
+	// resync lists mailboxes the server state no longer matches the cache for.
+	resync []string
 }
 
 // cachedState is the metadata recorded in the audit log. It never contains
@@ -50,9 +59,18 @@ type cachedState struct {
 // an inverse action; it is stored as params.undoOf and lets a restore target a
 // system folder.
 func (e *Executor) execute(ctx context.Context, a Action, ids []string, undoOf int64) (Result, error) {
+	return e.executeBatch(ctx, a, ids, undoOf, "")
+}
+
+// executeBatch is execute with an explicit audit batch id. UndoLast reuses one
+// batch id for the whole batch it undoes.
+func (e *Executor) executeBatch(ctx context.Context, a Action, ids []string, undoOf int64, batchID string) (Result, error) {
+	if batchID == "" {
+		batchID = e.newBatchID()
+	}
 	boxes, err := e.st.GetSyncState(ctx, e.opts.Account)
 	if err != nil {
-		return Result{}, fmt.Errorf("read mailboxes from cache: %w", err)
+		return Result{BatchID: batchID}, fmt.Errorf("read mailboxes from cache: %w", err)
 	}
 	boxIndex := make(map[string]store.MailboxState, len(boxes))
 	for _, b := range boxes {
@@ -60,11 +78,11 @@ func (e *Executor) execute(ctx context.Context, a Action, ids []string, undoOf i
 	}
 	membership, err := e.st.MembershipOfMessages(ctx, e.opts.Account, ids)
 	if err != nil {
-		return Result{}, fmt.Errorf("read placements from cache: %w", err)
+		return Result{BatchID: batchID}, fmt.Errorf("read placements from cache: %w", err)
 	}
 	flags, err := e.st.FlagsOfMessages(ctx, e.opts.Account, ids)
 	if err != nil {
-		return Result{}, fmt.Errorf("read flags from cache: %w", err)
+		return Result{BatchID: batchID}, fmt.Errorf("read flags from cache: %w", err)
 	}
 
 	rows := make(map[string]*rowState, len(ids))
@@ -80,32 +98,32 @@ func (e *Executor) execute(ctx context.Context, a Action, ids []string, undoOf i
 	case Archive, Move, Trash, Spam, NotSpam:
 		moveTo, err = e.moveTarget(a, boxIndex)
 		if err != nil {
-			return Result{}, err
+			return Result{BatchID: batchID}, err
 		}
 	case AddLabel, RemoveLabel:
 		labelTo, err = labelMailbox(a.Params.Label, boxIndex)
 		if err != nil {
-			return Result{}, err
+			return Result{BatchID: batchID}, err
 		}
 	}
 
 	if err := e.connect(ctx); err != nil {
-		return Result{}, err
+		return Result{BatchID: batchID}, err
 	}
 
 	outs := make(map[string]*outcome, len(ids))
 	var stopErr error
 	switch a.Type {
 	case MarkRead, MarkUnread, Star, Unstar:
-		outs, stopErr = e.applyFlags(ctx, a, ids, rows)
+		outs, stopErr = e.applyFlags(ctx, a, ids, rows, batchID, undoOf)
 	case Archive, Move, Trash, Spam, NotSpam:
-		outs, stopErr = e.applyMove(ctx, a, ids, rows, moveTo)
+		outs, stopErr = e.applyMove(ctx, a, ids, rows, boxIndex, moveTo, batchID, undoOf)
 	case AddLabel:
-		outs, stopErr = e.applyAddLabel(ctx, a, ids, rows, labelTo)
+		outs, stopErr = e.applyAddLabel(ctx, a, ids, rows, boxIndex, labelTo, batchID, undoOf)
 	case RemoveLabel:
-		outs, stopErr = e.applyRemoveLabel(ctx, a, ids, rows, labelTo)
+		outs, stopErr = e.applyRemoveLabel(ctx, a, ids, rows, boxIndex, labelTo, batchID, undoOf)
 	default:
-		return Result{}, fmt.Errorf("%w: unknown action %q", ErrInvalidAction, a.Type)
+		return Result{BatchID: batchID}, fmt.Errorf("%w: unknown action %q", ErrInvalidAction, a.Type)
 	}
 
 	// Missing rows and anything a family did not plan are failures here, so
@@ -121,7 +139,7 @@ func (e *Executor) execute(ctx context.Context, a Action, ids []string, undoOf i
 		outs[id] = &outcome{mid: id, err: errors.New(msg), after: stateOf(rows[id])}
 	}
 
-	res, finishErr := e.finish(ctx, a, ids, rows, outs)
+	res, finishErr := e.finish(ctx, a, ids, rows, outs, batchID, undoOf)
 	if finishErr != nil {
 		return res, finishErr
 	}
@@ -131,17 +149,20 @@ func (e *Executor) execute(ctx context.Context, a Action, ids []string, undoOf i
 	return res, stopErr
 }
 
-// finish writes one audit row per message, then applies the cache effects of
-// every verified message in one transaction. The audit write uses a context
-// without cancellation, so a cancelled call still leaves evidence.
-func (e *Executor) finish(ctx context.Context, a Action, ids []string, rows map[string]*rowState, outs map[string]*outcome) (Result, error) {
+// finish finalises the audit rows and applies the cache effects of every
+// message whose target effect was confirmed. Rows for writes were inserted
+// before the write (verified = 0), so a crash or a cancelled call still leaves
+// evidence; this step updates them. The audit and cache writes use a context
+// without cancellation, so a cancelled call still records what happened.
+func (e *Executor) finish(ctx context.Context, a Action, ids []string, rows map[string]*rowState, outs map[string]*outcome, batchID string, undoOf int64) (Result, error) {
 	auditCtx := context.WithoutCancel(ctx)
 	paramsJSON, err := json.Marshal(a.Params)
 	if err != nil {
-		return Result{}, err
+		return Result{BatchID: batchID}, err
 	}
 	var updates []store.ActionUpdate
-	res := Result{Applied: make([]string, 0, len(ids))}
+	var resync []string
+	res := Result{Applied: make([]string, 0, len(ids)), BatchID: batchID}
 	for _, id := range ids {
 		o := outs[id]
 		before := stateOf(rows[id])
@@ -153,16 +174,25 @@ func (e *Executor) finish(ctx context.Context, a Action, ids []string, rows map[
 			e.opts.Logf("actions: %s on %s failed: %v", a.Type, id, o.err)
 		}
 		verified := o.verified && o.err == nil
-		inverseJSON, err := json.Marshal(o.inverse)
+		inverse := o.inverse
+		if undoOf != 0 {
+			// An undo row is never itself undoable: there is no redo loop.
+			inverse = Inverse{}
+		}
+		inverseJSON, err := json.Marshal(inverse)
 		if err != nil {
 			return res, err
 		}
-		if o.inverse.Type == "" {
+		if inverse.Type == "" {
 			inverseJSON = []byte("{}")
 		}
 		beforeJSON, _ := json.Marshal(before)
 		afterJSON, _ := json.Marshal(after)
-		if _, err := e.audit.Insert(auditCtx, Entry{
+		recordErr := o.auditErr
+		if recordErr == nil {
+			recordErr = o.err
+		}
+		entry := Entry{
 			TS:          e.opts.Now(),
 			Account:     e.opts.Account,
 			Type:        string(a.Type),
@@ -172,15 +202,34 @@ func (e *Executor) finish(ctx context.Context, a Action, ids []string, rows map[
 			BeforeJSON:  string(beforeJSON),
 			AfterJSON:   string(afterJSON),
 			Verified:    verified,
-			Error:       errText(o.err),
-		}); err != nil {
-			return res, fmt.Errorf("write audit entry: %w", err)
+			Error:       errText(recordErr),
+			BatchID:     batchID,
+			UndoOf:      undoOf,
+		}
+		if o.auditID != 0 {
+			if err := e.audit.Finalize(auditCtx, o.auditID, entry); err != nil {
+				return res, fmt.Errorf("finalise audit entry %d: %w", o.auditID, err)
+			}
+		} else {
+			auditID, err := e.audit.Insert(auditCtx, entry)
+			if err != nil {
+				return res, fmt.Errorf("write audit entry: %w", err)
+			}
+			o.auditID = auditID
+		}
+		res.Entries = append(res.Entries, ResultEntry{
+			MID:      id,
+			AuditID:  o.auditID,
+			Undoable: verified && inverse.Type != "",
+		})
+		if o.update.MID != "" {
+			updates = append(updates, o.update)
+		}
+		if len(o.resync) > 0 {
+			resync = append(resync, o.resync...)
 		}
 		if verified {
 			res.Applied = append(res.Applied, id)
-			if o.update.MID != "" {
-				updates = append(updates, o.update)
-			}
 			continue
 		}
 		res.Failed = append(res.Failed, Failure{
@@ -190,8 +239,10 @@ func (e *Executor) finish(ctx context.Context, a Action, ids []string, rows map[
 		})
 	}
 	if err := e.st.ApplyActionUpdates(auditCtx, e.opts.Account, updates); err != nil {
+		e.requestResync(ctx, resync)
 		return res, fmt.Errorf("update cache after %s: %w", a.Type, err)
 	}
+	e.requestResync(ctx, resync)
 	return res, nil
 }
 
@@ -237,6 +288,25 @@ func normalizeFlags(flags []string) []string {
 	out := store.NormalizeFlags(flags)
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+// sameState reports whether two cached states are equal, in the form stored in
+// the audit log.
+func sameState(a, b cachedState) bool {
+	if len(a.Mailboxes) != len(b.Mailboxes) || len(a.Flags) != len(b.Flags) {
+		return false
+	}
+	for i := range a.Mailboxes {
+		if a.Mailboxes[i] != b.Mailboxes[i] {
+			return false
+		}
+	}
+	for i := range a.Flags {
+		if a.Flags[i] != b.Flags[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // flagsMailbox picks where a flag write runs: All Mail when present (one global
@@ -385,7 +455,15 @@ func isNo(err error) bool {
 	return errors.As(err, &ie) && ie.Type == imap.StatusResponseTypeNo
 }
 
-// destUIDFor maps a source UID to the UID it got in the target.
+// isEpochChanged reports a refused write because the cached UIDVALIDITY is
+// stale. The mailbox must be resynced; the message is a per-message failure.
+func isEpochChanged(err error) bool {
+	return errors.Is(err, mail.ErrEpochChanged)
+}
+
+// destUIDFor maps a source UID to the UID it got in the target. It is used only
+// for a synthetic mid, which an X-Pm-Internal-Id search cannot find; a canonical
+// message is always located by its identity header.
 func destUIDFor(data mail.CopyUID, source uint32) uint32 {
 	if len(data.SourceUIDs) != len(data.DestUIDs) {
 		return 0
@@ -414,4 +492,21 @@ func replaceName(list []string, from, to string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// partialCopyText explains a COPY fallback that left the source placement in
+// place. It is per action so the user reads what actually happened.
+func partialCopyText(a Action, source string) string {
+	switch a.Type {
+	case Archive:
+		return fmt.Sprintf("archived copy created; original still in %s — try again after the folders finish syncing", source)
+	case Trash:
+		return fmt.Sprintf("trashed copy created; original still in %s — try again after the folders finish syncing", source)
+	case Spam:
+		return fmt.Sprintf("spam copy created; original still in %s — try again after the folders finish syncing", source)
+	case NotSpam:
+		return fmt.Sprintf("copy created in INBOX; original still in %s — try again after the folders finish syncing", source)
+	default:
+		return fmt.Sprintf("copied to %s; original still in %s — try again after the folders finish syncing", a.Params.Folder, source)
+	}
 }

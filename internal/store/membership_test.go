@@ -342,3 +342,37 @@ func TestMessageCountsPerMailbox(t *testing.T) {
 		t.Fatalf("empty mailbox = %v, want 0 present", got)
 	}
 }
+
+// TestStaleEpochPlacementIsFiltered guards the epoch join: a placement row from
+// an older UIDVALIDITY is never returned, because its UID names a different
+// message in the current epoch. An interrupted epoch change can leave one.
+func TestStaleEpochPlacementIsFiltered(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	mustUpsertBoxes(t, s, model.Mailbox{Name: "INBOX", Kind: model.KindInbox, UIDValidity: 1})
+	if err := s.UpsertHeaders(ctx, acct, []model.MessageHeader{
+		member("INBOX", 1, 7, "pm-1", t0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sq := s.(*sqliteStore)
+	if _, err := sq.db.ExecContext(ctx, `
+		INSERT INTO placements (account, mailbox, uidvalidity, uid, mid, date)
+		VALUES (?, ?, ?, ?, ?, ?)`, acct, "INBOX", 9, 777, "pm-1", t0.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	mm, err := s.MembershipOfMessages(ctx, acct, []string{"pm-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mm["pm-1"]) != 1 || mm["pm-1"][0].UID != 7 || mm["pm-1"][0].UIDValidity != 1 {
+		t.Fatalf("membership = %+v, want only the current epoch", mm["pm-1"])
+	}
+	members, err := s.MembershipOf(ctx, MessageKey{Account: acct, Mailbox: "INBOX", UIDValidity: 9, UID: 777})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 || members[0].UIDValidity != 1 {
+		t.Fatalf("MembershipOf returned stale rows: %+v", members)
+	}
+}

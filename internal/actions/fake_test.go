@@ -23,18 +23,33 @@ type fakeMsg struct {
 }
 
 // fakeWriter is a stateful in-memory writer that models the researched Bridge
-// semantics, including the traps that matter to actions.
+// semantics, including the traps that matter to actions. It also models the
+// connection and the mailbox epoch, so the executor's reconnect and UIDVALIDITY
+// handling are covered.
 type fakeWriter struct {
-	mu      sync.Mutex
-	boxes   map[string]bool
-	nextUID map[string]uint32
-	msgs    map[string]*fakeMsg
+	mu        sync.Mutex
+	boxes     map[string]bool
+	epoch     map[string]uint32
+	nextUID   map[string]uint32
+	msgs      map[string]*fakeMsg
+	connected bool
+	connects  int
 
 	// traps
 	refuseMoveFromAllMail bool
 	refuseMoveToArchive   bool
 	noCopyUID             bool
 	dropCopyPlacement     bool
+	noUIDPLUS             bool
+	failIdentity          bool
+	failSearch            bool
+	failFetch             bool
+	multiSearch           map[string]bool
+	identityMismatch      map[string]string
+	refuseWrites          map[string]bool
+	transportWrites       map[string]bool
+	copyValidity          uint32
+	onStore               func()
 	// moveLag postpones the removal from the source for this many FetchFlags
 	// calls, modelling Bridge's eventual source removal.
 	moveLag int
@@ -52,12 +67,18 @@ type pendingMove struct {
 func newFakeWriter(boxes []string) *fakeWriter {
 	f := &fakeWriter{
 		boxes:                 map[string]bool{},
+		epoch:                 map[string]uint32{},
 		nextUID:               map[string]uint32{},
 		msgs:                  map[string]*fakeMsg{},
+		multiSearch:           map[string]bool{},
+		identityMismatch:      map[string]string{},
+		refuseWrites:          map[string]bool{},
+		transportWrites:       map[string]bool{},
 		refuseMoveFromAllMail: true,
 	}
 	for _, b := range boxes {
 		f.boxes[b] = true
+		f.epoch[b] = 1
 	}
 	return f
 }
@@ -76,9 +97,25 @@ func (f *fakeWriter) addMessage(mid string, flags []string, mailboxes ...string)
 	}
 	for _, mb := range mailboxes {
 		f.boxes[mb] = true
+		if f.epoch[mb] == 0 {
+			f.epoch[mb] = 1
+		}
 		m.placements[mb] = f.alloc(mb)
 	}
 	f.msgs[mid] = m
+}
+
+// bumpEpoch models a UIDVALIDITY reset: every UID in the mailbox is reassigned.
+func (f *fakeWriter) bumpEpoch(mailbox string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.epoch[mailbox]++
+	f.nextUID[mailbox] = 0
+	for _, m := range f.msgs {
+		if _, ok := m.placements[mailbox]; ok {
+			m.placements[mailbox] = f.alloc(mailbox)
+		}
+	}
 }
 
 func (f *fakeWriter) msgAt(mailbox string, uid uint32) *fakeMsg {
@@ -90,13 +127,55 @@ func (f *fakeWriter) msgAt(mailbox string, uid uint32) *fakeMsg {
 	return nil
 }
 
-func (f *fakeWriter) Connect(context.Context, config.BridgeAccount, string) error { return nil }
-
-func (f *fakeWriter) StoreFlags(_ context.Context, mailbox string, uids []uint32, add, remove []string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// ready models the connection and epoch checks the real writer does before a
+// write. A NO on writes is injected per mailbox to test group robustness.
+func (f *fakeWriter) ready(mailbox string, uidValidity uint32) error {
+	if !f.connected {
+		return mail.ErrNotConnected
+	}
 	if !f.boxes[mailbox] {
 		return fmt.Errorf("no such mailbox %s", mailbox)
+	}
+	if uidValidity != 0 && f.epoch[mailbox] != uidValidity {
+		return fmt.Errorf("%w: %s is now UIDVALIDITY %d, the cache has %d",
+			mail.ErrEpochChanged, mailbox, f.epoch[mailbox], uidValidity)
+	}
+	return nil
+}
+
+// writeReady is ready plus the injected write failures.
+func (f *fakeWriter) writeReady(mailbox string, uidValidity uint32) error {
+	if err := f.ready(mailbox, uidValidity); err != nil {
+		return err
+	}
+	if f.transportWrites[mailbox] {
+		return errors.New("connection reset by peer")
+	}
+	if f.refuseWrites[mailbox] {
+		return &imap.Error{Type: imap.StatusResponseTypeNo, Text: "NO"}
+	}
+	return nil
+}
+
+func (f *fakeWriter) Connect(context.Context, config.BridgeAccount, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connected = true
+	f.connects++
+	return nil
+}
+
+func (f *fakeWriter) StoreFlags(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, add, remove []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.onStore != nil {
+		f.onStore()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := f.writeReady(mailbox, uidValidity); err != nil {
+		return err
 	}
 	f.calls = append(f.calls, "STORE "+mailbox)
 	for _, uid := range uids {
@@ -114,11 +193,11 @@ func (f *fakeWriter) StoreFlags(_ context.Context, mailbox string, uids []uint32
 	return nil
 }
 
-func (f *fakeWriter) Move(_ context.Context, mailbox string, uids []uint32, target string) (mail.CopyUID, error) {
+func (f *fakeWriter) Move(_ context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (mail.CopyUID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.boxes[mailbox] {
-		return mail.CopyUID{}, fmt.Errorf("no such mailbox %s", mailbox)
+	if err := f.writeReady(mailbox, uidValidity); err != nil {
+		return mail.CopyUID{}, err
 	}
 	if f.refuseMoveFromAllMail && mailbox == "All Mail" {
 		return mail.CopyUID{}, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "MOVE from All Mail is not allowed"}
@@ -147,17 +226,21 @@ func (f *fakeWriter) Move(_ context.Context, mailbox string, uids []uint32, targ
 		}
 	}
 	f.calls = append(f.calls, "MOVE "+mailbox+"->"+target)
+	out.UIDValidity = f.epoch[target]
+	if f.copyValidity != 0 {
+		out.UIDValidity = f.copyValidity
+	}
 	if f.noCopyUID {
 		out = mail.CopyUID{}
 	}
 	return out, nil
 }
 
-func (f *fakeWriter) Copy(_ context.Context, mailbox string, uids []uint32, target string) (mail.CopyUID, error) {
+func (f *fakeWriter) Copy(_ context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (mail.CopyUID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.boxes[mailbox] {
-		return mail.CopyUID{}, fmt.Errorf("no such mailbox %s", mailbox)
+	if err := f.writeReady(mailbox, uidValidity); err != nil {
+		return mail.CopyUID{}, err
 	}
 	var out mail.CopyUID
 	for _, uid := range uids {
@@ -173,6 +256,10 @@ func (f *fakeWriter) Copy(_ context.Context, mailbox string, uids []uint32, targ
 		out.DestUIDs = append(out.DestUIDs, dest)
 	}
 	f.calls = append(f.calls, "COPY "+mailbox+"->"+target)
+	out.UIDValidity = f.epoch[target]
+	if f.copyValidity != 0 {
+		out.UIDValidity = f.copyValidity
+	}
 	if f.noCopyUID {
 		out = mail.CopyUID{}
 	}
@@ -181,9 +268,15 @@ func (f *fakeWriter) Copy(_ context.Context, mailbox string, uids []uint32, targ
 
 // ExpungeDeleted models the label semantics: it removes the placement in the one
 // mailbox and never the message from the others.
-func (f *fakeWriter) ExpungeDeleted(_ context.Context, mailbox string, uids []uint32) error {
+func (f *fakeWriter) ExpungeDeleted(_ context.Context, mailbox string, uidValidity uint32, uids []uint32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.writeReady(mailbox, uidValidity); err != nil {
+		return err
+	}
+	if f.noUIDPLUS {
+		return mail.ErrExpungeUnsupported
+	}
 	f.calls = append(f.calls, "EXPUNGE "+mailbox)
 	for _, uid := range uids {
 		m := f.msgAt(mailbox, uid)
@@ -195,24 +288,61 @@ func (f *fakeWriter) ExpungeDeleted(_ context.Context, mailbox string, uids []ui
 	return nil
 }
 
-func (f *fakeWriter) SearchInternalID(_ context.Context, mailbox, internalID string) ([]uint32, error) {
+func (f *fakeWriter) SearchInternalID(_ context.Context, mailbox string, uidValidity uint32, internalID string) ([]uint32, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.ready(mailbox, uidValidity); err != nil {
+		return nil, err
+	}
+	if f.failSearch {
+		return nil, errors.New("search failed")
+	}
 	m := f.msgs[internalID]
 	if m == nil {
 		return nil, nil
 	}
-	if uid, ok := m.placements[mailbox]; ok {
-		return []uint32{uid}, nil
+	uid, ok := m.placements[mailbox]
+	if !ok {
+		return nil, nil
 	}
-	return nil, nil
+	if f.multiSearch[internalID] {
+		return []uint32{uid, uid + 1000}, nil
+	}
+	return []uint32{uid}, nil
 }
 
-func (f *fakeWriter) FetchFlags(_ context.Context, mailbox string, uids []uint32) (map[uint32][]string, error) {
+func (f *fakeWriter) FetchInternalIDs(_ context.Context, mailbox string, uidValidity uint32, uids []uint32) (map[uint32]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.boxes[mailbox] {
-		return nil, fmt.Errorf("no such mailbox %s", mailbox)
+	if err := f.ready(mailbox, uidValidity); err != nil {
+		return nil, err
+	}
+	if f.failIdentity {
+		return nil, errors.New("identity fetch failed")
+	}
+	out := map[uint32]string{}
+	for _, uid := range uids {
+		m := f.msgAt(mailbox, uid)
+		if m == nil {
+			continue
+		}
+		id := m.mid
+		if wrong, ok := f.identityMismatch[m.mid]; ok {
+			id = wrong
+		}
+		out[uid] = id
+	}
+	return out, nil
+}
+
+func (f *fakeWriter) FetchFlags(_ context.Context, mailbox string, uidValidity uint32, uids []uint32) (map[uint32][]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.ready(mailbox, uidValidity); err != nil {
+		return nil, err
+	}
+	if f.failFetch {
+		return nil, errors.New("fetch failed")
 	}
 	// Advance eventual source removal.
 	if len(f.pending) > 0 {
@@ -235,7 +365,7 @@ func (f *fakeWriter) FetchFlags(_ context.Context, mailbox string, uids []uint32
 		if m == nil {
 			continue
 		}
-		var flags []string
+		flags := []string{}
 		for flag := range m.flags {
 			flags = append(flags, flag)
 		}
@@ -245,7 +375,12 @@ func (f *fakeWriter) FetchFlags(_ context.Context, mailbox string, uids []uint32
 	return out, nil
 }
 
-func (f *fakeWriter) Close() error { return nil }
+func (f *fakeWriter) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connected = false
+	return nil
+}
 
 func (f *fakeWriter) callList() []string {
 	f.mu.Lock()
@@ -261,6 +396,12 @@ func (f *fakeWriter) callCount(prefix string) int {
 		}
 	}
 	return n
+}
+
+func (f *fakeWriter) connectCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connects
 }
 
 func (f *fakeWriter) flagsOf(mid string, flag string) bool {
@@ -295,5 +436,3 @@ func (f *fakeWriter) mailboxesOf(mid string) []string {
 	sort.Strings(out)
 	return out
 }
-
-var _ = errors.Is

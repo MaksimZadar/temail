@@ -342,6 +342,24 @@ func (s *sqliteStore) PurgeMailbox(ctx context.Context, account, mailbox string)
 	return s.purgeMailboxChunked(ctx, account, mailbox)
 }
 
+// MarkMailboxesStale implements Store. LastSync zero makes the next watcher
+// check see the mailbox as changed (mailboxChanged checks LastSync first).
+func (s *sqliteStore) MarkMailboxesStale(ctx context.Context, account string, mailboxes []string) error {
+	if len(mailboxes) == 0 {
+		return nil
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		for _, mailbox := range mailboxes {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE mailboxes SET last_sync = 0 WHERE account = ? AND name = ?`,
+				account, mailbox); err != nil {
+				return fmt.Errorf("mark mailbox %s stale: %w", mailbox, err)
+			}
+		}
+		return nil
+	})
+}
+
 // purgeChunk bounds the rows deleted per transaction, so a large purge does not
 // hold the write lock for long.
 const purgeChunk = 1000

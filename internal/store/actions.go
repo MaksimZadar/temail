@@ -76,18 +76,20 @@ func (s *sqliteStore) ApplyActionUpdates(ctx context.Context, account string, up
 				}
 			}
 			if u.AddMailbox != "" {
-				var uidValidity uint32
-				err := tx.QueryRowContext(ctx, `
-					SELECT uidvalidity FROM mailboxes WHERE account = ? AND name = ?`,
-					account, u.AddMailbox).Scan(&uidValidity)
-				if errors.Is(err, sql.ErrNoRows) {
-					return fmt.Errorf("%w: mailbox %s", ErrNotFound, u.AddMailbox)
-				}
-				if err != nil {
-					return err
+				uidValidity := u.AddUIDValidity
+				if uidValidity == 0 {
+					err := tx.QueryRowContext(ctx, `
+						SELECT uidvalidity FROM mailboxes WHERE account = ? AND name = ?`,
+						account, u.AddMailbox).Scan(&uidValidity)
+					if errors.Is(err, sql.ErrNoRows) {
+						return fmt.Errorf("%w: mailbox %s", ErrNotFound, u.AddMailbox)
+					}
+					if err != nil {
+						return err
+					}
 				}
 				var date int64
-				err = tx.QueryRowContext(ctx, `
+				err := tx.QueryRowContext(ctx, `
 					SELECT date FROM messages WHERE account = ? AND mid = ?`,
 					account, u.MID).Scan(&date)
 				if errors.Is(err, sql.ErrNoRows) {

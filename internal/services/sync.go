@@ -242,6 +242,18 @@ func (s *SyncService) stillActive() bool {
 	return s.done != nil
 }
 
+// kickWatcher asks the running watcher to check the server soon. It is used
+// after an action left a mailbox's cache uncertain: the marked mailboxes are
+// re-synced by the next check. It does nothing when no watcher is running.
+func (s *SyncService) kickWatcher() {
+	s.mu.Lock()
+	w := s.watcher
+	s.mu.Unlock()
+	if w != nil {
+		w.Kick()
+	}
+}
+
 // restart stops the active run (if any) and starts again. Stop bumps gen, so
 // the start below reads credentials after the stop and is the only launch.
 func (s *SyncService) restart() {
