@@ -5,6 +5,7 @@
   import { ui } from "../stores/ui.svelte";
   import { sel } from "../stores/select.svelte";
   import { actions } from "../stores/actions.svelte";
+  import { suggest } from "../stores/suggest.svelte";
   import type { ActionType } from "../api";
 
   const acts: { type: ActionType; label: string; key: string; d: string }[] = [
@@ -126,6 +127,19 @@
       <svg viewBox="0 0 16 16" aria-hidden="true"
         ><path
           d="M2 4.5h4l1.2 1.5H14v6.5H2zM8 9h4M10.5 7.5 12 9l-1.5 1.5"
+        /></svg
+      >
+    </button>
+    <button
+      class="ib"
+      type="button"
+      title="Suggest labels (S)"
+      aria-label="Suggest labels"
+      onclick={() => suggest.trigger()}
+    >
+      <svg viewBox="0 0 16 16" aria-hidden="true"
+        ><path
+          d="M6.5 2.5 7.6 5.4l2.9 1.1-2.9 1.1-1.1 2.9-1.1-2.9-2.9-1.1 2.9-1.1zM12 9l.6 1.6 1.6.6-1.6.6L12 13.4l-.6-1.6-1.6-.6 1.6-.6z"
         /></svg
       >
     </button>

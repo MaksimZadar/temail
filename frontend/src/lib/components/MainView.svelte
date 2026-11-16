@@ -8,6 +8,7 @@
   import { ui } from "../stores/ui.svelte";
   import { sel } from "../stores/select.svelte";
   import { actions } from "../stores/actions.svelte";
+  import { suggest } from "../stores/suggest.svelte";
   import { findByKind } from "../mail/folders";
   import type { MailboxKind } from "../api";
   import Toolbar from "./Toolbar.svelte";
@@ -142,6 +143,7 @@
       ),
       ui.register("msg.read", (c) => act(c, () => void actions.toggleRead())),
       ui.register("msg.star", (c) => act(c, () => void actions.toggleStar())),
+      ui.register("msg.suggest", (c) => act(c, () => suggest.trigger())),
       ui.register("msg.undo", (c) => act(c, () => void actions.undoLast())),
       ui.register("select.toggle", (c) =>
         act(c, () => withCursor(() => sel.toggle())),

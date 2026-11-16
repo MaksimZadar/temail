@@ -2,7 +2,13 @@
 // popup are all generated from it. Key tokens: a printable key as typed
 // ("j", "G", "?"), or "C-d" for Ctrl+d, "Enter", "Escape", "Tab".
 
-export type Context = "global" | "wizard" | "main" | "settings";
+export type Context =
+  | "global"
+  | "wizard"
+  | "main"
+  | "settings"
+  /** The suggestion popup. Its keys are handled by the popup itself. */
+  | "suggest";
 export type Phase = 2 | 3 | 4 | 5;
 
 export interface Binding {
@@ -77,6 +83,7 @@ export const keymap: Binding[] = [
   b(";", "msg.label", "main", 2, "Actions", "Labels"),
   b("u", "msg.read", "main", 2, "Actions", "Mark read or unread"),
   b("s", "msg.star", "main", 2, "Actions", "Star or unstar"),
+  b("S", "msg.suggest", "main", 2, "Actions", "Suggest labels (AI)"),
   b("z", "msg.undo", "main", 2, "Actions", "Undo the last action"),
   b("x", "select.toggle", "main", 2, "Select", "Select or unselect this row"),
   b(
@@ -88,10 +95,24 @@ export const keymap: Binding[] = [
     "Select a range (move to extend)",
   ),
 
+  // Inside the suggestion popup (handled by the popup, listed here for help).
+  b("j", "suggest.down", "suggest", 2, "Suggestions", "Next suggestion"),
+  b("k", "suggest.up", "suggest", 2, "Suggestions", "Previous suggestion"),
+  b("Space", "suggest.toggle", "suggest", 2, "Suggestions", "Tick or untick"),
+  b("h", "suggest.prev", "suggest", 2, "Suggestions", "Previous email"),
+  b("l", "suggest.next", "suggest", 2, "Suggestions", "Next email"),
+  b("a", "suggest.accept", "suggest", 2, "Suggestions", "Accept ticked labels"),
+  b(
+    "Escape",
+    "suggest.cancel",
+    "suggest",
+    2,
+    "Suggestions",
+    "Cancel and discard",
+  ),
+
   // Reserved: kept free so the map stays consistent. Nothing here acts yet.
   b("i", "view.images", "main", 3, "Later", "Load remote images"),
-  b("a", "llm.accept", "main", 3, "Later", "Accept suggestion"),
-  b("S", "llm.panel", "main", 3, "Later", "Show suggestion"),
   b("r", "msg.reply", "main", 5, "Later", "Reply (draft)"),
   b("R", "msg.replyAll", "main", 5, "Later", "Reply all (draft)"),
 ];

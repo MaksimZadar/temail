@@ -12,6 +12,8 @@
   import SyncPanel from "./lib/components/SyncPanel.svelte";
   import Picker from "./lib/components/Picker.svelte";
   import Activity from "./lib/components/Activity.svelte";
+  import SuggestPopup from "./lib/components/SuggestPopup.svelte";
+  import { suggest } from "./lib/stores/suggest.svelte";
   import Toast from "./lib/components/Toast.svelte";
   import WhichKey from "./lib/components/WhichKey.svelte";
 
@@ -83,6 +85,7 @@
   </div>
   <Footer />
 </div>
+{#if suggest.open}<SuggestPopup />{/if}
 {#if ui.overlay === "help"}<HelpOverlay />{/if}
 {#if ui.overlay === "palette"}<Palette />{/if}
 {#if ui.overlay === "sync"}<SyncPanel />{/if}

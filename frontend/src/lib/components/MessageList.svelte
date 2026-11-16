@@ -6,6 +6,7 @@
   import { sync } from "../stores/sync.svelte";
   import { sel } from "../stores/select.svelte";
   import { actions, isStarred } from "../stores/actions.svelte";
+  import { suggest } from "../stores/suggest.svelte";
   import type { ActionType, MessageHeader } from "../api";
   import { formatListDate, isUnread, keyOf, senderName } from "../mail/format";
   import { scrollTopFor, windowFor } from "../mail/virtual";
@@ -112,6 +113,11 @@
     if (type === "star" || type === "unstar")
       type = headers.every(isStarred) ? "unstar" : "star";
     void actions.run(type, {}, { headers });
+  }
+
+  function rowSuggest(e: Event, m: MessageHeader): void {
+    e.stopPropagation();
+    suggest.trigger(sel.has(keyOf(m)) ? actions.targets() : [m]);
   }
 
   // Right-click menu.
@@ -239,6 +245,18 @@
             <span class="hover" role="group" aria-label="Quick actions">
               <button
                 type="button"
+                title="Suggest labels (S)"
+                aria-label="Suggest labels"
+                onclick={(e) => rowSuggest(e, m)}
+              >
+                <svg viewBox="0 0 16 16"
+                  ><path
+                    d="M6.5 2.5 7.6 5.4l2.9 1.1-2.9 1.1-1.1 2.9-1.1-2.9-2.9-1.1 2.9-1.1zM12 9l.6 1.6 1.6.6-1.6.6L12 13.4l-.6-1.6-1.6-.6 1.6-.6z"
+                  /></svg
+                >
+              </button>
+              <button
+                type="button"
                 title="Archive (e)"
                 aria-label="Archive"
                 onclick={(e) => rowAct(e, m, "archive")}
@@ -332,6 +350,14 @@
       >
       <button role="menuitem" type="button" onclick={() => menuPicker("label")}
         >Labels… <kbd>;</kbd></button
+      >
+      <button
+        role="menuitem"
+        type="button"
+        onclick={() => {
+          const headers = menuTargets();
+          menuAct(() => suggest.trigger(headers));
+        }}>Suggest labels… <kbd>S</kbd></button
       >
       <hr />
       <button role="menuitem" type="button" onclick={() => menuRun("mark_read")}
