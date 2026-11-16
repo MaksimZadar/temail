@@ -203,7 +203,7 @@ describe("keymap table", () => {
 
   it("marks later-phase keys as reserved", () => {
     const r = keymap.filter(
-      (b) => b.action === "msg.archive" || b.action === "msg.reply",
+      (b) => b.action === "llm.accept" || b.action === "msg.reply",
     );
     expect(r.length).toBe(2);
     expect(r.every(isReserved)).toBe(true);
