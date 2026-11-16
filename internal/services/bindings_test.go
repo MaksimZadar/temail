@@ -14,12 +14,14 @@ import (
 // is deliberate: every entry is a trust boundary.
 //
 // ActionService is the one intentional exception to the read-only rule: Apply,
-// Undo, UndoLast and Recent are mailbox writes / audit reads. They are safe
+// Undo, UndoLast and Recent are mailbox writes / audit reads. SuggestionService
+// is the second: it starts LLM jobs and applies their accepted labels through
+// ActionService; its only mailbox write is a verified create_label. They are safe
 // because every write goes through internal/actions, which only accepts the
-// allowlisted v1 action types, resolves UIDs from the cache (never from the
-// frontend), applies reversible recipes with post-write verification, and
-// records metadata only in audit.db. v1 has no permanent delete, no label
-// create/rename and no drafts.
+// allowlisted v1 action types (plus the audited create_label), resolves UIDs
+// from the cache (never from the frontend), applies reversible recipes with
+// post-write verification, and records metadata only in audit.db. v1 has no
+// permanent delete, no label rename or deletion and no drafts.
 var wantBound = map[string][]string{
 	"SetupService": {
 		"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert",
@@ -36,6 +38,9 @@ var wantBound = map[string][]string{
 	"ActionService": {
 		"Apply", "Recent", "Undo", "UndoLast",
 	},
+	"SuggestionService": {
+		"ApplySuggestions", "Cancel", "Status", "Suggest",
+	},
 }
 
 // lifecycle methods are called by Wails, not bound to the frontend.
@@ -46,11 +51,12 @@ var secretField = regexp.MustCompile(`(?i)password|passwd|secret|token|apikey|ap
 
 func boundServices() map[string]reflect.Type {
 	return map[string]reflect.Type{
-		"SetupService":  reflect.TypeOf(&SetupService{}),
-		"MailService":   reflect.TypeOf(&MailService{}),
-		"SyncService":   reflect.TypeOf(&SyncService{}),
-		"LLMService":    reflect.TypeOf(&LLMService{}),
-		"ActionService": reflect.TypeOf(&ActionService{}),
+		"SetupService":      reflect.TypeOf(&SetupService{}),
+		"MailService":       reflect.TypeOf(&MailService{}),
+		"SyncService":       reflect.TypeOf(&SyncService{}),
+		"LLMService":        reflect.TypeOf(&LLMService{}),
+		"ActionService":     reflect.TypeOf(&ActionService{}),
+		"SuggestionService": reflect.TypeOf(&SuggestionService{}),
 	}
 }
 
@@ -154,11 +160,12 @@ func TestActionDTOContract(t *testing.T) {
 // wailsCtxMethods take the Wails call context first. It is not visible to
 // JavaScript; it ends when the call is cancelled or the app shuts down.
 var wailsCtxMethods = map[string][]string{
-	"SetupService":  {"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert"},
-	"MailService":   {"CacheInfo", "GetAttachment", "GetMessage", "ListMailboxes", "ListMessages"},
-	"SyncService":   {},
-	"LLMService":    {"ListModels", "TestProvider"},
-	"ActionService": {"Apply", "Recent", "Undo", "UndoLast"},
+	"SetupService":      {"GetStatus", "ProbeCert", "SaveAccount", "TestConnection", "TrustCert"},
+	"MailService":       {"CacheInfo", "GetAttachment", "GetMessage", "ListMailboxes", "ListMessages"},
+	"SyncService":       {},
+	"LLMService":        {"ListModels", "TestProvider"},
+	"ActionService":     {"Apply", "Recent", "Undo", "UndoLast"},
+	"SuggestionService": {"ApplySuggestions", "Suggest"},
 }
 
 func TestBoundMethodsTakeWailsContext(t *testing.T) {

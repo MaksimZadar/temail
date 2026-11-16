@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -66,6 +68,13 @@ type Writer interface {
 	// Copy runs UID COPY from mailbox to target and returns the COPYUID data when
 	// the server reports it.
 	Copy(ctx context.Context, mailbox string, uidValidity uint32, uids []uint32, target string) (CopyUID, error)
+
+	// CreateMailbox creates a mailbox and verifies it with LIST afterwards. It
+	// is used for one operation only: creating a Proton label as
+	// Labels/<name> when the user accepts a suggested new label. The caller
+	// validates the name; this method only refuses an empty or control-laden
+	// name.
+	CreateMailbox(ctx context.Context, name string) error
 
 	// ExpungeDeleted sets \Deleted on uids in mailbox and then runs UID EXPUNGE
 	// for exactly those UIDs. It must only be called for a Labels/<name> mailbox
@@ -220,6 +229,34 @@ func (w *imapWriter) Copy(ctx context.Context, mailbox string, uidValidity uint3
 		return CopyUID{}, opErr(ctx, fmt.Errorf("copy UIDs %v from %s to %s: %w", uids, mailbox, target, err))
 	}
 	return copyUIDFrom(data.UIDValidity, data.SourceUIDs, data.DestUIDs), nil
+}
+
+// CreateMailbox implements Writer. CREATE is followed by LIST, so a success is
+// only reported when the mailbox is really there. A failed LIST leaves the
+// mailbox created but the call fails: the caller then reports the label as not
+// usable until the cache is refreshed.
+func (w *imapWriter) CreateMailbox(ctx context.Context, mailbox string) error {
+	if mailbox == "" || strings.ContainsFunc(mailbox, unicode.IsControl) {
+		return errors.New("create mailbox: a name without control characters is required")
+	}
+	cl, end, err := w.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer end()
+	if err := cl.Create(mailbox, nil).Wait(); err != nil {
+		return opErr(ctx, fmt.Errorf("create %s: %w", mailbox, err))
+	}
+	list, err := cl.List("", "*", nil).Collect()
+	if err != nil {
+		return opErr(ctx, fmt.Errorf("list after creating %s: %w", mailbox, err))
+	}
+	for _, item := range list {
+		if item.Mailbox == mailbox {
+			return nil
+		}
+	}
+	return fmt.Errorf("created %s but LIST does not report it", mailbox)
 }
 
 // ExpungeDeleted implements Writer.

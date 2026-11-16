@@ -42,11 +42,14 @@ type ActionDTO struct {
 }
 
 // ActionFailureDTO is one message the action did not apply to. Message is safe
-// to show: it names the mailbox and the failure, never message content.
+// to show: it names the mailbox and the failure, never message content. Code is
+// a stable reason set by the caller (suggestion apply uses it); empty for a
+// normal action failure.
 type ActionFailureDTO struct {
 	MID     string `json:"mid"`
 	Mailbox string `json:"mailbox"`
 	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
 }
 
 // ActionResultDTO is the outcome of one action.
@@ -105,6 +108,7 @@ type ActionEngine interface {
 	Undo(ctx context.Context, id int64) (actions.Result, error)
 	UndoLast(ctx context.Context) (actions.Result, error)
 	Recent(ctx context.Context, limit int) ([]actions.Entry, error)
+	CreateLabel(ctx context.Context, name string) error
 }
 
 // ActionService applies user actions and exposes the audit log with undo. It is
@@ -225,6 +229,23 @@ func (s *ActionService) Apply(ctx context.Context, in ActionDTO) (ActionResultDT
 		s.noteDone(in.Type, res)
 	}
 	return toActionResult(res), err
+}
+
+// createLabel creates a new Proton label through the same verified, audited
+// engine as the other writes. It is unexported on purpose: the frontend reaches
+// it only through SuggestionService.ApplySuggestions, where the name has already
+// been checked against the job's own suggestions.
+func (s *ActionService) createLabel(ctx context.Context, name string) error {
+	cctx, end, err := s.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer end()
+	eng, err := s.engineFor(ctx)
+	if err != nil {
+		return err
+	}
+	return eng.CreateLabel(cctx, name)
 }
 
 // Undo applies the inverse of one audit entry.
