@@ -62,6 +62,11 @@ func TestNoWriteCallsInSource(t *testing.T) {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
+		if f == "writer.go" {
+			// writer.go is the separate, write-capable Writer. Its recipe keeps
+			// EXPUNGE inside internal/actions' label/trash paths, checked there.
+			continue
+		}
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)

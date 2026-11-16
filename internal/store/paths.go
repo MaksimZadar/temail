@@ -10,13 +10,24 @@ import (
 // DefaultPath returns the location of cache.db: $XDG_DATA_HOME/temail/cache.db
 // on Linux (XDG_DATA_HOME defaults to ~/.local/share) and
 // %LOCALAPPDATA%\temail\cache.db on Windows. This is the data directory, not
-// the config directory. The audit log will use a separate file.
+// the config directory. The audit log uses a separate file.
 func DefaultPath() (string, error) {
 	base, err := dataBase()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(base, "temail", "cache.db"), nil
+}
+
+// DefaultAuditPath returns the location of audit.db in the same data directory
+// as cache.db. The audit log is a separate file so that deleting the cache never
+// removes it (docs/ARCHITECTURE.md §7).
+func DefaultAuditPath() (string, error) {
+	base, err := dataBase()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "temail", "audit.db"), nil
 }
 
 // dataBase returns the per-user data root for the current OS.
