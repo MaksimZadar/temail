@@ -119,7 +119,7 @@ func TestOneParsesSuggestionAndValidatesNames(t *testing.T) {
 	}
 	sys := messageContent(msgs[0])
 	user := messageContent(msgs[1])
-	for _, want := range []string{"untrusted data", "ignore", "Existing labels", "Work", "at most 8 labels"} {
+	for _, want := range []string{"untrusted data", "ignore", "Existing labels", "Work", "up to 12 labels", "broader categories"} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("system prompt missing %q", want)
 		}

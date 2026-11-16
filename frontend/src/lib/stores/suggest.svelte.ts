@@ -265,10 +265,20 @@ class Suggest {
 
   // ---- navigation and ticking ----
 
+  /**
+   * The current email's suggestions in display order: folder moves first, then
+   * labels (existing and new). Original (strongest-first) order is kept within
+   * each section. The cursor indexes this single flattened sequence.
+   */
+  get ordered(): api.SuggestLabel[] {
+    const all = this.currentResult?.ok ? (this.currentResult.labels ?? []) : [];
+    return [
+      ...all.filter((l) => l.target === "folder"),
+      ...all.filter((l) => l.target !== "folder"),
+    ];
+  }
   private labelCount(): number {
-    return this.currentResult?.ok
-      ? (this.currentResult.labels ?? []).length
-      : 0;
+    return this.ordered.length;
   }
   moveCursor(d: number): void {
     const n = this.labelCount();
@@ -292,7 +302,7 @@ class Suggest {
   }
   toggleCursor(): void {
     const t = this.current;
-    const l = this.currentResult?.labels?.[this.cursor];
+    const l = this.ordered[this.cursor];
     if (t && l) this.toggle(t.mid, l.name);
   }
   setAll(mid: string, on: boolean): void {

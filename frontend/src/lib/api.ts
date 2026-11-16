@@ -129,6 +129,8 @@ export interface LLMProvider {
   kind: "local" | "cloud";
   enabled: boolean;
   capabilities: LLMCapabilities;
+  /** "" keeps the provider default; "none" turns thinking off. */
+  thinking: string;
   isDefault: boolean;
   hasKey: boolean;
 }
@@ -140,7 +142,16 @@ export interface LLMProviderIn {
   kind: "local" | "cloud";
   enabled: boolean;
   capabilities: LLMCapabilities;
+  /** "" keeps the provider default; "none" turns thinking off. */
+  thinking: string;
   apiKey: string;
+}
+/** What a model reports about its thinking control (local Ollama only). */
+export interface ModelCapabilities {
+  thinkingSupported: boolean;
+  /** Values config accepts; "" stands for the provider default. */
+  thinkingValues: string[];
+  thinkingDefault: string;
 }
 export interface ProviderTest {
   ok: boolean;
@@ -361,6 +372,14 @@ export const testProvider = (name: string): Promise<ProviderTest> =>
   LLMService.TestProvider(name) as unknown as Promise<ProviderTest>;
 export const listModels = (name: string): Promise<string[]> =>
   LLMService.ListModels(name) as unknown as Promise<string[]>;
+/** What a model reports about its thinking control. An empty model probes the
+ * provider's saved model. Only a local Ollama provider answers; other
+ * providers return an unsupported error. */
+export const modelCapabilities = (
+  name: string,
+  model: string,
+): Promise<ModelCapabilities> =>
+  LLMService.ModelCapabilities(name, model) as unknown as Promise<ModelCapabilities>;
 /** Open a URL in the system browser. */
 export const openUrl = (url: string): Promise<void> => Browser.OpenURL(url);
 export const syncStart = (): Promise<void> => SyncService.Start();

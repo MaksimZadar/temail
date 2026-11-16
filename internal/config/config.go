@@ -73,6 +73,34 @@ const (
 	KindLocal = "local"
 )
 
+// Thinking values accepted by LLMProvider.Thinking. Empty means "provider
+// default" and is always allowed. "none" turns reasoning off; the levels ask
+// for more reasoning. Not every model supports every value; the LLMService
+// ModelCapabilities method reports what a local Ollama model offers.
+const (
+	ThinkingNone   = "none"
+	ThinkingLow    = "low"
+	ThinkingMedium = "medium"
+	ThinkingHigh   = "high"
+)
+
+// ThinkingValues lists the non-empty values Thinking accepts, strongest last.
+var ThinkingValues = []string{ThinkingNone, ThinkingLow, ThinkingMedium, ThinkingHigh}
+
+// ValidThinking reports whether s is an allowed Thinking value. The empty
+// string is allowed and means "provider default".
+func ValidThinking(s string) bool {
+	if s == "" {
+		return true
+	}
+	for _, v := range ThinkingValues {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
 // LLMProvider describes one LLM endpoint. The API key (if any) is not stored
 // here; it lives in the keyring under "llm:<name>" or in TEMAIL_LLM_<NAME>_KEY.
 //
@@ -83,6 +111,9 @@ const (
 //   - Enabled: nil means the default for the kind (local on, cloud off). A
 //     cloud provider must be enabled before any content is sent to it.
 //   - Capabilities: what the endpoint supports. Unset flags mean "no".
+//   - Thinking: the reasoning effort for chat completions. Empty keeps the
+//     provider's default; "none" turns thinking off. See ThinkingNone and
+//     friends for the allowed values.
 type LLMProvider struct {
 	Name         string          `json:"name"`
 	BaseURL      string          `json:"baseURL"`
@@ -90,6 +121,7 @@ type LLMProvider struct {
 	Kind         string          `json:"kind,omitempty"`
 	Enabled      *bool           `json:"enabled,omitempty"`
 	Capabilities LLMCapabilities `json:"capabilities,omitempty"`
+	Thinking     string          `json:"thinking,omitempty"`
 	// KeyBinding is the BaseURLBinding of the base URL that the stored API key
 	// was approved for. It is not a secret. A key is used only while the base
 	// URL still has this binding (see KeyBoundTo), so a key never follows a URL
@@ -274,6 +306,10 @@ func Validate(c Config) error {
 		}
 		if p.Capabilities.MaxContext < 0 {
 			add("%s: capabilities.maxContext must not be negative", where)
+		}
+		if !ValidThinking(p.Thinking) {
+			add("%s: thinking %q must be empty, %q, %q, %q or %q", where, p.Thinking,
+				ThinkingNone, ThinkingLow, ThinkingMedium, ThinkingHigh)
 		}
 	}
 	if c.LLM.DefaultProvider != "" && !names[c.LLM.DefaultProvider] {

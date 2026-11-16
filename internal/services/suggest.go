@@ -253,7 +253,7 @@ func (s *SuggestionService) Suggest(ctx context.Context, messageIDs []string, pr
 	if prov.EffectiveKind() == config.KindLocal {
 		emailTimeout = 0
 	}
-	client, err := s.llm.clientForTimeout(name, emailTimeout)
+	client, err := s.llm.clientForThinking(name, emailTimeout, suggestionThinking(prov))
 	if err != nil {
 		return "", err
 	}
@@ -883,6 +883,24 @@ func sameIDs(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// suggestionThinking picks the reasoning effort for a suggestion job.
+//
+// Label classification does not need reasoning: on qwen3:8b with Ollama 0.40.16
+// the default thinking mode took 11.3 s and 306 completion tokens per call,
+// while "none" took 0.27 s and 7 tokens. So a local provider defaults to
+// "none" unless its config sets a value. A cloud provider keeps its configured
+// value, or the provider default when none is set: a cloud model may not
+// accept "none", and its config is the user's explicit choice.
+func suggestionThinking(p config.LLMProvider) string {
+	if p.Thinking != "" {
+		return p.Thinking
+	}
+	if p.EffectiveKind() == config.KindLocal {
+		return config.ThinkingNone
+	}
+	return ""
 }
 
 // pickSuggestionProvider resolves the named provider, or the default one. With

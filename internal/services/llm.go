@@ -91,8 +91,11 @@ type LLMProviderDTO struct {
 	Kind         string             `json:"kind"`
 	Enabled      bool               `json:"enabled"`
 	Capabilities LLMCapabilitiesDTO `json:"capabilities"`
-	IsDefault    bool               `json:"isDefault"`
-	HasKey       bool               `json:"hasKey"`
+	// Thinking is "", "none", "low", "medium" or "high" (see
+	// config.ThinkingValues). Empty means the provider's default.
+	Thinking  string `json:"thinking"`
+	IsDefault bool   `json:"isDefault"`
+	HasKey    bool   `json:"hasKey"`
 }
 
 // LLMProviderInput is what SaveProvider accepts. APIKey is write-only: an empty
@@ -105,7 +108,19 @@ type LLMProviderInput struct {
 	Kind         string             `json:"kind"`
 	Enabled      bool               `json:"enabled"`
 	Capabilities LLMCapabilitiesDTO `json:"capabilities"`
-	APIKey       string             `json:"apiKey"`
+	// Thinking is optional: "" keeps the provider default, "none" turns
+	// thinking off. Anything else than the config.ThinkingValues is refused.
+	Thinking string `json:"thinking"`
+	APIKey   string `json:"apiKey"`
+}
+
+// ModelCapabilitiesDTO is what a model reports about its thinking control.
+// ThinkingValues lists the values config accepts, with "" standing for the
+// provider default; ThinkingDefault is the value used when none is chosen.
+type ModelCapabilitiesDTO struct {
+	ThinkingSupported bool     `json:"thinkingSupported"`
+	ThinkingValues    []string `json:"thinkingValues"`
+	ThinkingDefault   string   `json:"thinkingDefault"`
 }
 
 // ProviderTest is the outcome of TestProvider. Message never contains a key or
@@ -144,6 +159,7 @@ func (s *LLMService) ListProviders() ([]LLMProviderDTO, error) {
 			Kind:         p.EffectiveKind(),
 			Enabled:      p.IsEnabled(),
 			Capabilities: capsDTO(p.Capabilities),
+			Thinking:     p.Thinking,
 			IsDefault:    p.Name == cfg.LLM.DefaultProvider,
 			HasKey:       kerr == nil,
 		})
@@ -175,6 +191,9 @@ func (s *LLMService) SaveProvider(in LLMProviderInput) error {
 		return fmt.Errorf("%w: model", ErrInvalidInput)
 	case len(in.APIKey) > maxAPIKeyLen:
 		return fmt.Errorf("%w: apiKey is too long", ErrInvalidInput)
+	case !config.ValidThinking(in.Thinking):
+		return fmt.Errorf("%w: thinking must be empty, %q, %q, %q or %q", ErrInvalidInput,
+			config.ThinkingNone, config.ThinkingLow, config.ThinkingMedium, config.ThinkingHigh)
 	}
 	targetKind := (config.LLMProvider{Kind: in.Kind, BaseURL: baseURL}).EffectiveKind()
 
@@ -244,6 +263,7 @@ func (s *LLMService) SaveProvider(in LLMProviderInput) error {
 	p.Kind = in.Kind
 	p.Enabled = &enabled
 	p.Capabilities = capsFromDTO(in.Capabilities)
+	p.Thinking = in.Thinking
 	p.KeyBinding = binding
 	if idx >= 0 {
 		cfg.LLM.Providers[idx] = p
@@ -404,6 +424,52 @@ func (s *LLMService) ListModels(ctx context.Context, name string) ([]string, err
 	return ids, nil
 }
 
+// ModelCapabilities reports what one model offers. Only a local Ollama
+// provider is queried (POST {baseURL without /v1}/api/show); another kind and
+// an endpoint without that route return llm.ErrModelCapabilitiesUnsupported, so
+// the UI can hide the thinking control. The model argument overrides the
+// provider's saved model, so the UI can probe one that is being typed. No API
+// key is read or sent.
+func (s *LLMService) ModelCapabilities(name, model string) (ModelCapabilitiesDTO, error) {
+	empty := ModelCapabilitiesDTO{ThinkingValues: []string{}}
+	if len(model) > maxProviderModel {
+		return empty, fmt.Errorf("%w: model", ErrInvalidInput)
+	}
+	s.cfgMu.Lock()
+	cfg, err := s.loadConfig()
+	if err != nil {
+		s.cfgMu.Unlock()
+		return empty, err
+	}
+	idx := findProvider(cfg, name)
+	if idx < 0 {
+		s.cfgMu.Unlock()
+		return empty, ErrProviderNotFound
+	}
+	prov := cfg.LLM.Providers[idx]
+	s.cfgMu.Unlock()
+
+	if prov.EffectiveKind() != config.KindLocal {
+		return empty, llm.ErrModelCapabilitiesUnsupported
+	}
+	if m := strings.TrimSpace(model); m != "" {
+		prov.Model = m
+	}
+	client, err := llm.NewClient(llm.ProviderFrom(prov), "", llm.Options{})
+	if err != nil {
+		return empty, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+	support, err := client.ModelThinking(context.Background())
+	if err != nil {
+		return empty, err
+	}
+	return ModelCapabilitiesDTO{
+		ThinkingSupported: support.Supported,
+		ThinkingValues:    support.Values,
+		ThinkingDefault:   support.Default,
+	}, nil
+}
+
 // clientFor builds an llm client for a configured provider. The config and the
 // key are read together under cfgMu, so a writer that is half done cannot be
 // seen: the key is never paired with a base URL it was not saved for. The lock
@@ -417,8 +483,15 @@ func (s *LLMService) clientFor(name string) (*llm.Client, error) {
 // clientForTimeout builds an llm client with a specific per-request timeout. A
 // timeout of zero or less disables the request timeout: the caller's context is
 // then the only bound on the reply, which is what a slow local model needs.
-// Connect and TLS handshake stay bounded either way.
+// Connect and TLS handshake stay bounded either way. The provider's configured
+// thinking value applies.
 func (s *LLMService) clientForTimeout(name string, timeout time.Duration) (*llm.Client, error) {
+	return s.clientForThinking(name, timeout, "")
+}
+
+// clientForThinking is clientForTimeout with a thinking override. An empty
+// thinking falls back to the provider's configured value.
+func (s *LLMService) clientForThinking(name string, timeout time.Duration, thinking string) (*llm.Client, error) {
 	s.cfgMu.Lock()
 	cfg, err := s.loadConfig()
 	if err != nil {
@@ -448,6 +521,10 @@ func (s *LLMService) clientForTimeout(name string, timeout time.Duration) (*llm.
 	if timeout <= 0 {
 		opts.NoRequestTimeout = true
 	}
+	if thinking == "" {
+		thinking = prov.Thinking
+	}
+	opts.Thinking = thinking
 	client, err := llm.NewClient(llm.ProviderFrom(prov), key, opts)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)

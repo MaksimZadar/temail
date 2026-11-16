@@ -33,6 +33,11 @@
     <h3>{p.name}</h3>
     <span class="badge" class:cloud>{cloud ? "Cloud" : "Local"}</span>
     {#if p.isDefault}<span class="badge def">Default</span>{/if}
+    {#if !cloud}
+      <span class="badge" data-testid="thinking-badge"
+        >Thinking: {p.thinking === "" ? "default" : p.thinking === "none" ? "off" : p.thinking}</span
+      >
+    {/if}
     <span class="grow"></span>
     {#if cloud}
       <label class="switch">

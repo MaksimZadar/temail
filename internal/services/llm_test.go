@@ -203,6 +203,7 @@ func TestSaveProviderValidationWritesNothing(t *testing.T) {
 		{"bad base URL", LLMProviderInput{Name: "x", BaseURL: "ftp://nope"}},
 		{"unknown kind", LLMProviderInput{Name: "x", BaseURL: "https://a.example/v1", Kind: "remote"}},
 		{"negative context", LLMProviderInput{Name: "x", BaseURL: "https://a.example/v1", Capabilities: LLMCapabilitiesDTO{MaxContext: -5}}},
+		{"unknown thinking", LLMProviderInput{Name: "x", BaseURL: "http://127.0.0.1:8080/v1", Thinking: "max"}},
 		{"oversized key", LLMProviderInput{Name: "x", BaseURL: "https://a.example/v1", APIKey: strings.Repeat("k", maxAPIKeyLen+1)}},
 	}
 	for _, tt := range tests {
@@ -239,6 +240,37 @@ func TestSaveProviderCreatesWithKeyAndKeepsItOutOfConfig(t *testing.T) {
 	p := fc.current().LLM.Providers[2]
 	if p.Name != "lab" || !p.IsEnabled() || p.Capabilities.MaxContext != 8000 {
 		t.Fatalf("provider not saved: %+v", p)
+	}
+}
+
+func TestSaveProviderPersistsThinking(t *testing.T) {
+	svc, fc := newLLMSvc(t, llmConfig(), newFakeKeys())
+	if err := svc.SaveProvider(LLMProviderInput{
+		Name: "ollama", BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen3:8b",
+		Kind: config.KindLocal, Enabled: true, Thinking: config.ThinkingNone,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fc.current().LLM.Providers[0].Thinking; got != config.ThinkingNone {
+		t.Fatalf("saved thinking = %q, want none", got)
+	}
+	list, err := svc.ListProviders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list[0].Thinking != config.ThinkingNone {
+		t.Fatalf("DTO thinking = %q, want none", list[0].Thinking)
+	}
+
+	// An empty value means "provider default" and is allowed.
+	if err := svc.SaveProvider(LLMProviderInput{
+		Name: "ollama", BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen3:8b",
+		Kind: config.KindLocal, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fc.current().LLM.Providers[0].Thinking; got != "" {
+		t.Fatalf("thinking after clearing = %q, want empty", got)
 	}
 }
 
@@ -465,6 +497,60 @@ func TestListModelsSortedAndUnsupported(t *testing.T) {
 	ids, err = svc2.ListModels(context.Background(), "ollama")
 	if !errors.Is(err, llm.ErrModelListUnsupported) || ids == nil || len(ids) != 0 {
 		t.Fatalf("unsupported: ids=%v err=%v", ids, err)
+	}
+}
+
+func TestModelCapabilitiesReadsOllamaShow(t *testing.T) {
+	var gotModel string
+	showSrv := fakeLLM(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/show" {
+			http.NotFound(w, r)
+			return
+		}
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("Authorization = %q; /api/show must not send a key", auth)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		gotModel, _ = body["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"capabilities":["completion","tools","thinking"],"thinking":{"values":[false,true],"default":true}}`)
+	})
+	c := llmConfig()
+	c.LLM.Providers[0].BaseURL = showSrv.URL + "/v1"
+	svc, _ := newLLMSvc(t, c, newFakeKeys())
+
+	got, err := svc.ModelCapabilities("ollama", "qwen3:8b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotModel != "qwen3:8b" {
+		t.Errorf("model sent = %q", gotModel)
+	}
+	if !got.ThinkingSupported || got.ThinkingDefault != "" {
+		t.Fatalf("capabilities = %+v", got)
+	}
+	if len(got.ThinkingValues) != 2 || got.ThinkingValues[0] != config.ThinkingNone || got.ThinkingValues[1] != "" {
+		t.Fatalf("values = %v, want [none, \"\"]", got.ThinkingValues)
+	}
+
+	// A cloud provider is never probed.
+	if _, err := svc.ModelCapabilities("openrouter", "gpt-x"); !errors.Is(err, llm.ErrModelCapabilitiesUnsupported) {
+		t.Fatalf("cloud err = %v, want ErrModelCapabilitiesUnsupported", err)
+	}
+	if _, err := svc.ModelCapabilities("missing", "m"); !errors.Is(err, ErrProviderNotFound) {
+		t.Fatalf("missing provider err = %v", err)
+	}
+}
+
+func TestModelCapabilitiesEndpointWithoutShow(t *testing.T) {
+	noShow := fakeLLM(t, func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	c := llmConfig()
+	c.LLM.Providers[0].BaseURL = noShow.URL + "/v1"
+	svc, _ := newLLMSvc(t, c, newFakeKeys())
+	if _, err := svc.ModelCapabilities("ollama", "qwen3:8b"); !errors.Is(err, llm.ErrModelCapabilitiesUnsupported) {
+		t.Fatalf("err = %v, want ErrModelCapabilitiesUnsupported", err)
 	}
 }
 

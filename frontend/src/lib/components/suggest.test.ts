@@ -81,6 +81,7 @@ const provider = (o: Partial<api.LLMProvider> = {}): api.LLMProvider => ({
   kind: "local",
   enabled: true,
   capabilities: { structuredOutput: true, tools: false, maxContext: 0 },
+  thinking: "",
   isDefault: true,
   hasKey: false,
   ...o,
@@ -547,6 +548,52 @@ describe("targets and waiting", () => {
     expect(o("Finance").getAttribute("aria-selected")).toBe("true");
     expect(o("Maybe").getAttribute("aria-selected")).toBe("false");
     expect(o("Fresh").getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("groups into Folders and Labels; j/k cross the boundary as one list", async () => {
+    await openWith([
+      res("mid5", [
+        { name: "Work" },
+        { name: "Fresh", existing: false, target: "new" },
+        { name: "Finance", existing: false, target: "folder" },
+      ]),
+    ]);
+    const groups = screen
+      .getAllByRole("group")
+      .filter((g) => g.classList.contains("sec"));
+    expect(groups.map((g) => g.getAttribute("aria-labelledby"))).toEqual([
+      "sg-h-folders",
+      "sg-h-labels",
+    ]);
+    const names = within(
+      screen.getByRole("listbox", { name: /Suggested labels/ }),
+    )
+      .getAllByRole("option")
+      .map((o) => o.querySelector(".name")?.textContent);
+    expect(names).toEqual(["Finance", "Work", "Fresh"]);
+    const lb = screen.getByRole("listbox", { name: /Suggested labels/ });
+    expect(lb.getAttribute("aria-activedescendant")).toBe("sg-l0");
+    await key("j");
+    expect(lb.getAttribute("aria-activedescendant")).toBe("sg-l1");
+    await key(" ");
+    const o = (n: string) =>
+      screen.getByRole("option", { name: new RegExp(n) });
+    expect(o("Work").getAttribute("aria-selected")).toBe("false");
+    await key("j");
+    await key("j");
+    expect(lb.getAttribute("aria-activedescendant")).toBe("sg-l2");
+    await key("k");
+    await key("k");
+    expect(lb.getAttribute("aria-activedescendant")).toBe("sg-l0");
+  });
+
+  it("hides an empty section", async () => {
+    await openWith([res("mid5", [{ name: "Work" }])]);
+    expect(
+      screen.getAllByRole("group").filter((g) => g.classList.contains("sec"))
+        .length,
+    ).toBe(1);
+    expect(screen.queryByText("Folders")).toBeNull();
   });
 
   it("an honest summary for moves and labels", async () => {

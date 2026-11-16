@@ -34,6 +34,7 @@ vi.mock("../api", () => ({
   setDefaultProvider: vi.fn(async () => {}),
   testProvider: vi.fn(),
   listModels: vi.fn(),
+  modelCapabilities: vi.fn(),
 }));
 
 import * as api from "../api";
@@ -51,6 +52,7 @@ const prov = (o: Partial<api.LLMProvider> = {}): api.LLMProvider => ({
   kind: "local",
   enabled: true,
   capabilities: { structuredOutput: false, tools: false, maxContext: 0 },
+  thinking: "",
   isDefault: false,
   hasKey: false,
   ...o,
@@ -614,5 +616,111 @@ describe("the form", () => {
     expect(
       await screen.findByText(/re-enter the key once/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("thinking", () => {
+  const edit = async (p = prov()) => {
+    await openSettings([p]);
+    await fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    return (await screen.findByLabelText("Thinking")) as HTMLSelectElement;
+  };
+  const labels = (sel: HTMLSelectElement) =>
+    within(sel)
+      .getAllByRole("option")
+      .map((o) => o.textContent);
+
+  it("shows a badge on a local card and none on a cloud card", async () => {
+    await openSettings([prov({ thinking: "none" }), cloud()]);
+    const badges = await screen.findAllByTestId("thinking-badge");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent("Thinking: off");
+  });
+
+  it("falls back to a simple list with help text", async () => {
+    const sel = await edit();
+    expect(labels(sel)).toEqual([
+      "Model default",
+      "Off (faster)",
+      "Low",
+      "Medium",
+      "High",
+    ]);
+    expect(screen.getByText(/Support depends on the model/)).toBeInTheDocument();
+    expect(sel).not.toBeDisabled();
+  });
+
+  it("detects a boolean-only model", async () => {
+    m.modelCapabilities.mockResolvedValue({
+      thinkingSupported: true,
+      thinkingValues: ["none", ""],
+      thinkingDefault: "",
+    });
+    const sel = await edit();
+    await fireEvent.click(screen.getByRole("button", { name: "Detect" }));
+    await waitFor(() =>
+      expect(labels(sel)).toEqual(["Model default", "Off (faster)"]),
+    );
+    expect(m.modelCapabilities).toHaveBeenCalledWith("ollama", "llama3.1");
+  });
+
+  it("detects named levels and marks the default", async () => {
+    m.modelCapabilities.mockResolvedValue({
+      thinkingSupported: true,
+      thinkingValues: ["low", "medium", "high"],
+      thinkingDefault: "medium",
+    });
+    const sel = await edit();
+    await fireEvent.click(screen.getByRole("button", { name: "Detect" }));
+    await waitFor(() =>
+      expect(labels(sel)).toEqual([
+        "Model default",
+        "Off (faster)",
+        "Low",
+        "Medium (default)",
+        "High",
+      ]),
+    );
+  });
+
+  it("keeps the simple list when detection is unsupported", async () => {
+    m.modelCapabilities.mockRejectedValue(new Error("not supported"));
+    const sel = await edit();
+    await fireEvent.click(screen.getByRole("button", { name: "Detect" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Detect" })).not.toBeDisabled(),
+    );
+    expect(labels(sel)).toHaveLength(5);
+    expect(screen.getByText(/Support depends on the model/)).toBeInTheDocument();
+  });
+
+  it("disables the select and button while detecting", async () => {
+    let done!: (v: api.ModelCapabilities) => void;
+    m.modelCapabilities.mockReturnValue(new Promise((r) => (done = r)));
+    const sel = await edit();
+    await fireEvent.click(screen.getByRole("button", { name: "Detect" }));
+    expect(sel).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Detecting…" })).toBeDisabled();
+    done({ thinkingSupported: false, thinkingValues: [], thinkingDefault: "" });
+    await waitFor(() => expect(sel).not.toBeDisabled());
+  });
+
+  it("saves the chosen value and keeps the loaded one on edit", async () => {
+    const sel = await edit(prov({ thinking: "high" }));
+    expect(sel.value).toBe("high");
+    await fireEvent.change(sel, { target: { value: "none" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(m.saveProvider).toHaveBeenCalledWith(
+        expect.objectContaining({ thinking: "none" }),
+      ),
+    );
+  });
+
+  it("is not offered for cloud providers", async () => {
+    await openSettings([cloud()]);
+    await fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await screen.findByLabelText("Model");
+    expect(screen.queryByLabelText("Thinking")).toBeNull();
   });
 });

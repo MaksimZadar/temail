@@ -38,8 +38,9 @@ const (
 	// MaxBodyChars caps the plain-text body sent for one email. At the llm
 	// package's estimate of 4 characters per token this is about 4000 tokens.
 	MaxBodyChars = 16000
-	// MaxLabels caps the labels kept for one email.
-	MaxLabels = 8
+	// MaxLabels caps the labels kept for one email. More candidates give the
+	// user more choice in the review popup; unticking an unwanted one is cheap.
+	MaxLabels = 12
 	// MaxNewLabels caps labels that do not exist yet for one email.
 	MaxNewLabels = 2
 	// MaxNameLen caps a label name in characters.
@@ -138,9 +139,9 @@ func BuildRequest(msg Message, existing, folders []string) llm.Request {
 func systemPrompt(existing, folders []string) string {
 	var b strings.Builder
 	b.WriteString("You label email for a mail client. You see one email per request. ")
-	b.WriteString("Propose at most ")
+	b.WriteString("Propose up to ")
 	b.WriteString(strconv.Itoa(MaxLabels))
-	b.WriteString(" labels that describe it, strongest first. ")
+	b.WriteString(" labels that could apply to it, strongest first, including broader categories when relevant. ")
 	b.WriteString("Prefer an existing label or folder when one fits. You may propose at most ")
 	b.WriteString(strconv.Itoa(MaxNewLabels))
 	b.WriteString(" names that are neither an existing label nor an existing folder; every other label must come from one of those lists. ")

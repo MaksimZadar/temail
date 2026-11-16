@@ -52,7 +52,8 @@ The model's reply is data too. `Normalize` never trusts it:
 - path separators, control characters, leading/trailing spaces, only-dot names,
   and system folder names (`INBOX`, `Sent`, `Drafts`, `Trash`, `Spam`, `Archive`,
   `All Mail`, ...) are dropped;
-- at most 8 labels survive, at most 2 of them new (in neither the existing
+- up to 12 labels survive (the prompt asks for up to 12 candidates,
+  including broader categories), at most 2 of them new (in neither the existing
   label list nor the folder list; a folder name is an existing target and does
   not use the new-name budget);
 - confidence outside 0..1 is dropped, duplicates are removed, and the summary is
@@ -81,7 +82,7 @@ failure message.
 |-------|-------|
 | Messages per job (`MaxBatch`) | 25 |
 | Body characters per email (`MaxBodyChars`) | 16000 (about 4000 tokens at 4 chars/token) |
-| Labels per email (`MaxLabels`) | 8 |
+| Labels per email (`MaxLabels`) | 12 |
 | New labels per email (`MaxNewLabels`) | 2 |
 | Label name length (`MaxNameLen`) | 64 |
 | Summary length (`MaxSummaryChars`) | 280 |
@@ -89,6 +90,17 @@ failure message.
 
 `HTMLToText` converts sanitized HTML to plain text for messages without a
 text/plain part. `TruncateBody` is rune-safe and appends `[...truncated]`.
+
+## Thinking
+
+`SuggestionService` runs a local provider with thinking `none` unless the
+provider config sets a value, because choosing labels does not need a reasoning
+trace. Measured on Ollama 0.40.16 with qwen3:8b, one label call took 11.3 s and
+306 completion tokens with the model's default thinking, and 0.27 s with 7
+tokens when `reasoning_effort` was `none`. A cloud provider keeps its configured
+value or the provider default, since a cloud model may not accept `none`. The
+prompt asks for up to 12 candidates (broader categories included) so the review
+popup offers more choice; only 2 of them may be new names.
 
 ## Tests
 
