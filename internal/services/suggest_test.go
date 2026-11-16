@@ -3,10 +3,13 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/emersion/go-imap/v2"
 
 	"github.com/MaksimZadar/temail/internal/actions"
 	"github.com/MaksimZadar/temail/internal/config"
@@ -18,10 +21,12 @@ import (
 
 func suggestTestConfig() config.Config {
 	c := readyConfig()
+	on := true
 	c.LLM.Providers = []config.LLMProvider{
 		{Name: "local", BaseURL: "http://127.0.0.1:11434/v1", Model: "m", Kind: config.KindLocal,
 			Capabilities: config.LLMCapabilities{StructuredOutput: true}},
 		{Name: "cloud", BaseURL: "https://llm.example.test/v1", Model: "m", Kind: config.KindCloud},
+		{Name: "cloud-on", BaseURL: "https://llm.example.test/v1", Model: "m", Kind: config.KindCloud, Enabled: &on},
 	}
 	c.LLM.DefaultProvider = "local"
 	return c
@@ -278,7 +283,7 @@ func TestSuggestTimeoutAndMissingMessage(t *testing.T) {
 			return suggest.Suggestion{Summary: "late"}, nil
 		}
 	})
-	jobID, err := fx.svc.Suggest(context.Background(), []string{"m1", "ghost"}, "")
+	jobID, err := fx.svc.Suggest(context.Background(), []string{"m1", "ghost"}, "cloud-on")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,6 +303,54 @@ func TestSuggestTimeoutAndMissingMessage(t *testing.T) {
 	}
 }
 
+func TestSuggestLocalCallHasNoDeadline(t *testing.T) {
+	fx := newSuggestFixture(t)
+	fx.addMailboxes()
+	fx.addMessage("m1", "INBOX", 1, "One", "Body")
+	fx.svc.emailTimeout = 10 * time.Millisecond // must not apply to a local provider
+	setOne(fx.svc, func(ctx context.Context, _ suggest.Message, _, _ []string) (suggest.Suggestion, error) {
+		if dl, ok := ctx.Deadline(); ok {
+			t.Errorf("a local provider call got a deadline %v; it must rely on Cancel", dl)
+		}
+		return suggest.Suggestion{Summary: "ok"}, nil
+	})
+	jobID, err := fx.svc.Suggest(context.Background(), []string{"m1"}, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done := waitDone(t, fx.em); done.Failed != 0 {
+		t.Fatalf("done = %+v", done)
+	}
+	for _, r := range resultsOf(fx.em, jobID) {
+		if !r.OK || r.Code != "" {
+			t.Errorf("local result = %+v", r)
+		}
+	}
+}
+
+func TestSuggestCloudDeadlineIs120s(t *testing.T) {
+	fx := newSuggestFixture(t)
+	fx.addMailboxes()
+	fx.addMessage("m1", "INBOX", 1, "One", "Body")
+	fx.svc.emailTimeout = suggestCloudTimeout
+	setOne(fx.svc, func(ctx context.Context, _ suggest.Message, _, _ []string) (suggest.Suggestion, error) {
+		dl, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("a cloud provider call has no deadline")
+		}
+		if left := time.Until(dl); left < 100*time.Second || left > suggestCloudTimeout {
+			t.Errorf("cloud deadline left = %v, want about %v", left, suggestCloudTimeout)
+		}
+		return suggest.Suggestion{Summary: "ok"}, nil
+	})
+	if _, err := fx.svc.Suggest(context.Background(), []string{"m1"}, "cloud-on"); err != nil {
+		t.Fatal(err)
+	}
+	if done := waitDone(t, fx.em); done.Failed != 0 {
+		t.Fatalf("done = %+v", done)
+	}
+}
+
 func TestSuggestCancelDiscardsResults(t *testing.T) {
 	fx := newSuggestFixture(t)
 	fx.addMailboxes()
@@ -308,8 +361,12 @@ func TestSuggestCancelDiscardsResults(t *testing.T) {
 		case started <- struct{}{}:
 		default:
 		}
-		time.Sleep(200 * time.Millisecond)
-		return suggest.Suggestion{Summary: "late"}, nil
+		select {
+		case <-ctx.Done():
+			return suggest.Suggestion{}, ctx.Err()
+		case <-time.After(2 * time.Second):
+			return suggest.Suggestion{Summary: "late"}, nil
+		}
 	})
 	jobID, err := fx.svc.Suggest(context.Background(), []string{"m1"}, "")
 	if err != nil {
@@ -421,6 +478,84 @@ func TestApplySuggestionsCreatesLabelAndAddsLabels(t *testing.T) {
 	}
 }
 
+func TestSuggestTargetsAndApplyFolderAsMove(t *testing.T) {
+	fx := newSuggestFixture(t)
+	fx.addMailboxes() // Labels/Work and Folders/Projects
+	fx.addMessage("m1", "INBOX", 1, "Invoice", "Body")
+	setOne(fx.svc, func(ctx context.Context, _ suggest.Message, _, _ []string) (suggest.Suggestion, error) {
+		return suggest.Suggestion{Summary: "ok", Labels: []suggest.Label{
+			{Name: "Work", Confidence: 1},
+			{Name: "Projects", Confidence: 0.9},
+			{Name: "Receipts", Confidence: 0.8},
+		}}, nil
+	})
+	fx.eng.res = actions.Result{
+		Applied: []string{"m1"}, BatchID: "b1",
+		Entries: []actions.ResultEntry{{MID: "m1", AuditID: 7, Undoable: true}},
+	}
+
+	jobID, err := fx.svc.Suggest(context.Background(), []string{"m1"}, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done := waitDone(t, fx.em); done.Failed != 0 {
+		t.Fatalf("done = %+v", done)
+	}
+	results := resultsOf(fx.em, jobID)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	targets := map[string]string{}
+	for _, l := range results[0].Labels {
+		targets[l.Name] = l.Target
+	}
+	if targets["Work"] != SuggestTargetLabel {
+		t.Errorf("Work target = %q, want %q", targets["Work"], SuggestTargetLabel)
+	}
+	if targets["Projects"] != SuggestTargetFolder {
+		t.Errorf("Projects target = %q, want %q", targets["Projects"], SuggestTargetFolder)
+	}
+	if targets["Receipts"] != SuggestTargetNew {
+		t.Errorf("Receipts target = %q, want %q", targets["Receipts"], SuggestTargetNew)
+	}
+
+	res, err := fx.svc.ApplySuggestions(context.Background(), jobID, map[string][]string{
+		"m1": {"Work", "Projects", "Receipts"},
+	})
+	if err != nil {
+		t.Fatalf("ApplySuggestions: %v", err)
+	}
+	if len(res.CreatedLabels) != 1 || res.CreatedLabels[0] != "Receipts" {
+		t.Errorf("created labels = %v, want only Receipts", res.CreatedLabels)
+	}
+	if res.AppliedCount != 1 || res.FailedCount != 0 {
+		t.Errorf("result = %+v", res)
+	}
+	applied := fx.eng.appliedActions()
+	if len(applied) != 3 {
+		t.Fatalf("apply calls = %d, want 3 (label, folder, new label)", len(applied))
+	}
+	byType := map[actions.Type]actions.Action{}
+	for _, a := range applied {
+		byType[a.Type] = a
+	}
+	if a, ok := byType[actions.Move]; !ok || a.Params.Folder != "Folders/Projects" {
+		t.Errorf("folder action = %+v", byType[actions.Move])
+	}
+	labelNames := map[string]bool{}
+	for _, a := range applied {
+		if a.Type == actions.AddLabel {
+			labelNames[a.Params.Label] = true
+		}
+	}
+	if !labelNames["Work"] || !labelNames["Receipts"] {
+		t.Errorf("applied labels = %v", labelNames)
+	}
+	if got := fx.eng.createdLabels(); len(got) != 1 || got[0] != "Receipts" {
+		t.Errorf("engine created = %v", got)
+	}
+}
+
 func TestApplySuggestionsRejectsUnknownAndReportsCreateFailure(t *testing.T) {
 	fx := newSuggestFixture(t)
 	fx.addMailboxes()
@@ -444,13 +579,19 @@ func TestApplySuggestionsRejectsUnknownAndReportsCreateFailure(t *testing.T) {
 		t.Fatalf("a rejected call created labels: %v", got)
 	}
 
-	fx.eng.createErr = errors.New("bridge refused")
+	fx.eng.createErr = fmt.Errorf("create Labels/Receipts: %w", &imap.Error{
+		Type: imap.StatusResponseTypeNo,
+		Text: "Mailbox already exists\r\n (CREATE refused)",
+	})
 	res, err := fx.svc.ApplySuggestions(context.Background(), jobID, map[string][]string{"m1": {"Receipts"}})
 	if err != nil {
 		t.Fatalf("ApplySuggestions: %v", err)
 	}
 	if res.FailedCount != 1 || res.Failed[0].Code != CodeCreateLabel || res.CreatedLabels == nil || len(res.CreatedLabels) != 0 {
 		t.Errorf("result = %+v", res)
+	}
+	if msg := res.Failed[0].Message; !strings.Contains(msg, "Mailbox already exists") || strings.ContainsAny(msg, "\r\n") {
+		t.Errorf("create failure message = %q, want the sanitized server text", msg)
 	}
 	if got := len(fx.eng.appliedActions()); got != 0 {
 		t.Errorf("apply ran after a failed create: %d calls", got)

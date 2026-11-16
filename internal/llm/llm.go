@@ -22,8 +22,14 @@ import (
 	"github.com/MaksimZadar/temail/internal/config"
 )
 
-// DefaultTimeout bounds one request when Options.Timeout is zero.
+// DefaultTimeout bounds one request when Options.Timeout is zero and the
+// request timeout is enabled.
 const DefaultTimeout = 60 * time.Second
+
+// DefaultDialTimeout bounds the connect and TLS handshake steps even when the
+// overall request timeout is disabled. A local model may take minutes to reply,
+// but a dead endpoint should still fail quickly.
+const DefaultDialTimeout = 10 * time.Second
 
 // Sentinel errors. Callers match them with errors.Is.
 var (
@@ -150,7 +156,16 @@ func ProviderFrom(p config.LLMProvider) Provider {
 // Options configures a Client. The zero value uses DefaultTimeout.
 type Options struct {
 	// Timeout bounds one HTTP request. The caller's context can end sooner.
+	// It is ignored when NoRequestTimeout is set.
 	Timeout time.Duration
+	// NoRequestTimeout disables the per-request timeout. The caller's context
+	// is then the only bound on a reply. Local models can be very slow, so
+	// suggestion jobs use this for local providers and rely on the Cancel
+	// button. Connect and TLS handshake stay bounded by DialTimeout.
+	NoRequestTimeout bool
+	// DialTimeout bounds connect and TLS handshake. Zero uses
+	// DefaultDialTimeout. It applies even when NoRequestTimeout is set.
+	DialTimeout time.Duration
 }
 
 // normalizeBase makes sure the base URL ends with "/" so that paths join right.

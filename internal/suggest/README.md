@@ -30,8 +30,9 @@ Schema (`mail_label_suggestion`):
 ## Prompt structure
 
 - The **system message** carries the task, the limits, the existing label list,
-  the folder list (context only), and the security rules. It never contains the
-  email.
+  the folder list, and the security rules. Proton folders and labels are
+  distinct: a suggested name that matches a folder is applied as a move to that
+  folder, not as a new label. It never contains the email.
 - The **user message** is one delimited `<email-data>` block with From, Subject,
   Folder, the labels already on the message, and the body. The block is
   explicitly labelled untrusted data.
@@ -51,7 +52,9 @@ The model's reply is data too. `Normalize` never trusts it:
 - path separators, control characters, leading/trailing spaces, only-dot names,
   and system folder names (`INBOX`, `Sent`, `Drafts`, `Trash`, `Spam`, `Archive`,
   `All Mail`, ...) are dropped;
-- at most 8 labels survive, at most 2 of them new (not in the existing list);
+- at most 8 labels survive, at most 2 of them new (in neither the existing
+  label list nor the folder list; a folder name is an existing target and does
+  not use the new-name budget);
 - confidence outside 0..1 is dropped, duplicates are removed, and the summary is
   cut to 280 characters;
 - `existing` is recomputed from the caller's allowlist, never taken from the
@@ -59,6 +62,18 @@ The model's reply is data too. `Normalize` never trusts it:
 
 The apply step in `SuggestionService` accepts only labels the job itself
 proposed, so even a hostile reply cannot name an arbitrary label or message.
+Each accepted name is resolved against the cached mailbox list: `Labels/<name>`
+is an `add_label`; `Folders/<name>` is a verified move to that folder; anything
+else is created as `Labels/<name>` and then added. The per-suggestion `target`
+field (`label`, `folder` or `new`) is computed in Go for the UI.
+
+Proton treats folders and labels as one display-name namespace: it refuses a
+folder and a label with the same name. That is why a folder match must become a
+move, never a CREATE of `Labels/<name>`. A CREATE that Bridge refuses is
+reported with the server's own NO text, sanitized to one line (no request
+body, path or credential). Proton also limits free plans to 3 folders and 3
+labels; that limit is enforced by the server and surfaces through the same
+failure message.
 
 ## Limits
 

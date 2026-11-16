@@ -27,9 +27,22 @@ const (
 
 // Suggestion job limits. The batch cap lives in internal/suggest.
 const (
-	suggestConcurrency  = 2
-	suggestEmailTimeout = 60 * time.Second
+	suggestConcurrency = 2
+	// suggestCloudTimeout bounds one email on a cloud provider. Cloud endpoints
+	// can be slower than the old 60 s, so the per-email bound is 120 s. A local
+	// provider has no request timeout (see Suggest): it may run until the user
+	// cancels the job.
+	suggestCloudTimeout = 120 * time.Second
 	suggestJobDrainWait = shutdownWait
+)
+
+// Suggestion targets. The Go side classifies each suggested name against the
+// cached mailbox list, so the UI can say "move to folder", "add label" or
+// "new label" without guessing.
+const (
+	SuggestTargetLabel  = "label"
+	SuggestTargetFolder = "folder"
+	SuggestTargetNew    = "new"
 )
 
 // Job states returned by Status.
@@ -48,6 +61,7 @@ const (
 	CodeCache       = "cache_error"
 	CodeCreateLabel = "create_failed"
 	CodeApplyLabel  = "apply_failed"
+	CodeMoveFolder  = "move_failed"
 	CodeRejected    = "rejected"
 )
 
@@ -64,12 +78,16 @@ var (
 	ErrJobNotFound = errors.New("no such suggestion job")
 )
 
-// SuggestLabelDTO is one proposed label.
+// SuggestLabelDTO is one proposed label. Target is computed in Go against the
+// cached mailbox list: "label" (Labels/<name> exists), "folder" (Folders/<name>
+// exists, so applying it is a move) or "new" (create Labels/<name> first). The
+// addition is additive; older UI code can ignore it.
 type SuggestLabelDTO struct {
 	Name       string  `json:"name"`
 	Confidence float64 `json:"confidence"`
 	Reason     string  `json:"reason"`
 	Existing   bool    `json:"existing"`
+	Target     string  `json:"target"`
 }
 
 // SuggestResultDTO is the per-email suggestion result. Labels and Summary are
@@ -159,8 +177,10 @@ type SuggestionService struct {
 
 	// one is replaceable for tests. concurrency, emailTimeout and newJobID are
 	// pinned by the tests too.
-	one          func(ctx context.Context, c *llm.Client, msg suggest.Message, existing, folders []string) (suggest.Suggestion, error)
-	concurrency  int
+	one         func(ctx context.Context, c *llm.Client, msg suggest.Message, existing, folders []string) (suggest.Suggestion, error)
+	concurrency int
+	// emailTimeout bounds one email on a cloud provider. It is not applied to
+	// a local provider, which has no request timeout.
 	emailTimeout time.Duration
 	newJobID     func() string
 	seq          uint64
@@ -182,7 +202,7 @@ func NewSuggestionService(st store.Store, cfg ConfigStore, llmSvc *LLMService, a
 		st: st, cfg: cfg, llm: llmSvc, actions: actionSvc, emitter: emitter,
 		one:          suggest.One,
 		concurrency:  suggestConcurrency,
-		emailTimeout: suggestEmailTimeout,
+		emailTimeout: suggestCloudTimeout,
 		base:         base,
 		cancelBase:   cancel,
 		jobs:         map[string]*suggestJob{},
@@ -226,7 +246,14 @@ func (s *SuggestionService) Suggest(ctx context.Context, messageIDs []string, pr
 	if prov.EffectiveKind() != config.KindLocal && !prov.IsEnabled() {
 		return "", ErrSuggestCloudDisabled
 	}
-	client, err := s.llm.clientFor(name)
+	// A local model can be extra slow, so it gets no request timeout: only the
+	// Cancel button (job context) ends a call. A cloud provider keeps a bounded
+	// per-email timeout. Connect and TLS handshake stay bounded for both.
+	emailTimeout := s.emailTimeout
+	if prov.EffectiveKind() == config.KindLocal {
+		emailTimeout = 0
+	}
+	client, err := s.llm.clientForTimeout(name, emailTimeout)
 	if err != nil {
 		return "", err
 	}
@@ -253,7 +280,7 @@ func (s *SuggestionService) Suggest(ctx context.Context, messageIDs []string, pr
 	s.jobs = map[string]*suggestJob{j.id: j}
 	s.current = j.id
 	s.wg.Add(1)
-	go s.run(jobCtx, j, client, acct)
+	go s.run(jobCtx, j, client, acct, emailTimeout)
 	return j.id, nil
 }
 
@@ -290,12 +317,12 @@ func (s *SuggestionService) Cancel(jobID string) error {
 
 // ApplySuggestions applies the accepted labels of one job. accepted maps a
 // message id to label names. Only labels that job proposed for that message are
-// accepted; anything else is refused. A label that is not in the cached
-// mailbox list is created as Labels/<name> first (verified with LIST and
-// audited as a non-undoable create_label row), then the label is added with the
-// normal verified add_label recipe, one batch per label. Per-message failures
-// carry a code, and the call itself fails only for invalid input, a missing
-// job, or a refusal before any write.
+// accepted; anything else is refused. Each name is resolved against the cached
+// mailbox list: Labels/<name> -> add_label; else Folders/<name> -> move to that
+// folder (Proton folders and labels are distinct); else create Labels/<name>
+// (verified with LIST and audited as a non-undoable create_label row), then add
+// the label. Per-message failures carry a code, and the call itself fails only
+// for invalid input, a missing job, or a refusal before any write.
 func (s *SuggestionService) ApplySuggestions(ctx context.Context, jobID string, accepted map[string][]string) (SuggestApplyDTO, error) {
 	if err := ctx.Err(); err != nil {
 		return SuggestApplyDTO{}, err
@@ -371,13 +398,9 @@ func (s *SuggestionService) ApplySuggestions(ctx context.Context, jobID string, 
 	if err != nil {
 		return SuggestApplyDTO{}, err
 	}
-	existing, _, _, err := s.labelContext(ctx, acct)
+	mailboxes, err := s.labelContext(ctx, acct)
 	if err != nil {
 		return SuggestApplyDTO{}, err
-	}
-	existingSet := map[string]bool{}
-	for _, name := range existing {
-		existingSet[strings.ToLower(name)] = true
 	}
 
 	keys := make([]string, 0, len(byLabel))
@@ -393,37 +416,64 @@ func (s *SuggestionService) ApplySuggestions(ctx context.Context, jobID string, 
 	failed := map[string]ActionFailureDTO{}
 	applyOK := map[string]bool{}
 
+	// Proton folders and labels are distinct. A suggested name that exists as
+	// Folders/<name> but not as Labels/<name> is an existing folder target:
+	// apply it as a move. Only a truly unknown name creates Labels/<name>.
 	// Create the unknown labels first. A creation failure fails every message
 	// that accepted that label, but other labels and messages still run.
+	created := map[string]bool{}
 	for _, key := range keys {
-		if existingSet[key] {
+		if mailboxes.target(key) != SuggestTargetNew {
 			continue
 		}
 		name := labelName[key]
 		if err := s.actions.createLabel(ctx, name); err != nil {
+			msg := "the new label could not be created"
+			// Bridge's own NO text is the useful part for a failed CREATE.
+			// ServerRefusalMessage keeps only that line: no local path, request
+			// body or credential temail built.
+			if detail := actions.ServerRefusalMessage(err); detail != "" {
+				msg += ": " + detail
+			}
 			for _, mid := range byLabel[key] {
-				failed[mid] = ActionFailureDTO{MID: mid, Message: "the new label could not be created", Code: CodeCreateLabel}
+				failed[mid] = ActionFailureDTO{MID: mid, Message: msg, Code: CodeCreateLabel}
 			}
 			continue
 		}
 		out.CreatedLabels = append(out.CreatedLabels, name)
-		existingSet[key] = true
+		created[key] = true
 	}
 
 	for _, key := range keys {
-		if !existingSet[key] {
-			continue // creation failed; failures are recorded above
-		}
 		name := labelName[key]
 		mids := byLabel[key]
-		res, err := s.actions.Apply(ctx, ActionDTO{
-			Type:       string(actions.AddLabel),
-			Params:     ActionParamsDTO{Label: name},
-			MessageIDs: mids,
-		})
+		var (
+			in     ActionDTO
+			code   string
+			errMsg string
+		)
+		if mailboxes.target(key) == SuggestTargetFolder {
+			in = ActionDTO{
+				Type:       string(actions.Move),
+				Params:     ActionParamsDTO{Folder: mailboxes.foldersByKey[key]},
+				MessageIDs: mids,
+			}
+			code, errMsg = CodeMoveFolder, "the message could not be moved to the folder"
+		} else {
+			if mailboxes.target(key) == SuggestTargetNew && !created[key] {
+				continue // creation failed; failures are recorded above
+			}
+			in = ActionDTO{
+				Type:       string(actions.AddLabel),
+				Params:     ActionParamsDTO{Label: name},
+				MessageIDs: mids,
+			}
+			code, errMsg = CodeApplyLabel, "the label could not be applied"
+		}
+		res, err := s.actions.Apply(ctx, in)
 		if err != nil {
 			for _, mid := range mids {
-				failed[mid] = ActionFailureDTO{MID: mid, Message: "the label could not be applied", Code: CodeApplyLabel}
+				failed[mid] = ActionFailureDTO{MID: mid, Message: errMsg, Code: code}
 			}
 			continue
 		}
@@ -435,7 +485,7 @@ func (s *SuggestionService) ApplySuggestions(ctx context.Context, jobID string, 
 			applyOK[mid] = true
 		}
 		for _, f := range res.Failed {
-			failed[f.MID] = ActionFailureDTO{MID: f.MID, Mailbox: f.Mailbox, Message: f.Message, Code: CodeApplyLabel}
+			failed[f.MID] = ActionFailureDTO{MID: f.MID, Mailbox: f.Mailbox, Message: f.Message, Code: code}
 			delete(applyOK, f.MID)
 		}
 	}
@@ -456,16 +506,17 @@ func (s *SuggestionService) ApplySuggestions(ctx context.Context, jobID string, 
 
 // run loads the cache context once, then suggests for each message with at most
 // two calls in flight. A cancelled job stops without recording results.
-func (s *SuggestionService) run(ctx context.Context, j *suggestJob, client *llm.Client, account string) {
+func (s *SuggestionService) run(ctx context.Context, j *suggestJob, client *llm.Client, account string, emailTimeout time.Duration) {
 	defer s.wg.Done()
 	defer j.cancel()
 
-	labels, folders, _, lerr := s.labelContext(ctx, account)
+	mailboxes, lerr := s.labelContext(ctx, account)
 	if lerr != nil {
 		s.failJob(j, CodeCache, "the mailbox list could not be read")
 		s.finish(j)
 		return
 	}
+	labels, folders := mailboxes.labels, mailboxes.folders
 	members, merr := s.st.MembershipOfMessages(ctx, account, j.mids)
 	if merr != nil {
 		s.failJob(j, CodeCache, "the message list could not be read")
@@ -502,8 +553,14 @@ func (s *SuggestionService) run(ctx context.Context, j *suggestJob, client *llm.
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			ectx, cancel := context.WithTimeout(ctx, s.emailTimeout)
-			defer cancel()
+			// A local provider has no deadline: only Cancel (or shutdown) ends
+			// the call. A cloud provider is bounded per email.
+			ectx := ctx
+			if emailTimeout > 0 {
+				var cancel context.CancelFunc
+				ectx, cancel = context.WithTimeout(ctx, emailTimeout)
+				defer cancel()
+			}
 			raw, err := s.one(ectx, client, p.msg, labels, folders)
 			res := SuggestResultDTO{JobID: j.id, MID: p.mid, Labels: []SuggestLabelDTO{}}
 			if err != nil {
@@ -512,12 +569,13 @@ func (s *SuggestionService) run(ctx context.Context, j *suggestJob, client *llm.
 				s.record(j, res)
 				return
 			}
-			norm := suggest.Normalize(raw, labels)
+			norm := suggest.NormalizeWithFolders(raw, labels, folders)
 			res.OK = true
 			res.Summary = norm.Summary
 			for _, l := range norm.Labels {
 				res.Labels = append(res.Labels, SuggestLabelDTO{
 					Name: l.Name, Confidence: l.Confidence, Reason: l.Reason, Existing: l.Existing,
+					Target: mailboxes.target(l.Name),
 				})
 			}
 			s.record(j, res)
@@ -674,36 +732,64 @@ func displayName(p store.Placement) string {
 	return p.Mailbox
 }
 
-// labelContext returns the cached label names, the folder names, and a set of
-// lower-cased label names. Both lists are sorted and deduplicated.
-func (s *SuggestionService) labelContext(ctx context.Context, account string) (labels, folders []string, labelSet map[string]bool, err error) {
+// mailboxContext is the cached mailbox list, indexed for suggestion targets.
+// Labels and folders are separate namespaces in Proton, so a name can be a
+// label, a folder, both (the label wins) or neither.
+type mailboxContext struct {
+	labels  []string
+	folders []string
+	// labelsByKey maps a lower-cased label display name to its canonical name.
+	labelsByKey map[string]string
+	// foldersByKey maps a lower-cased folder display name to the full cached
+	// mailbox name (for example Folders/Finance).
+	foldersByKey map[string]string
+}
+
+// target classifies a suggested name as an existing label, an existing folder
+// or a new label.
+func (c mailboxContext) target(name string) string {
+	key := strings.ToLower(name)
+	if _, ok := c.labelsByKey[key]; ok {
+		return SuggestTargetLabel
+	}
+	if _, ok := c.foldersByKey[key]; ok {
+		return SuggestTargetFolder
+	}
+	return SuggestTargetNew
+}
+
+// labelContext returns the cached labels and folders, sorted and deduplicated,
+// with the name indexes used by target and ApplySuggestions.
+func (s *SuggestionService) labelContext(ctx context.Context, account string) (mailboxContext, error) {
 	states, err := s.st.GetSyncState(ctx, account)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("read mailboxes: %w", err)
+		return mailboxContext{}, fmt.Errorf("read mailboxes: %w", err)
 	}
-	labelSet = map[string]bool{}
-	seenFolder := map[string]bool{}
+	out := mailboxContext{
+		labelsByKey:  map[string]string{},
+		foldersByKey: map[string]string{},
+	}
 	for _, st := range states {
 		name := st.DisplayName
 		if name == "" {
 			name = displayName(store.Placement{Mailbox: st.Name})
 		}
+		key := strings.ToLower(name)
 		if st.Kind == model.KindLabel {
-			key := strings.ToLower(name)
-			if !labelSet[key] {
-				labelSet[key] = true
-				labels = append(labels, name)
+			if _, ok := out.labelsByKey[key]; !ok {
+				out.labelsByKey[key] = name
+				out.labels = append(out.labels, name)
 			}
 			continue
 		}
-		if !seenFolder[strings.ToLower(name)] {
-			seenFolder[strings.ToLower(name)] = true
-			folders = append(folders, name)
+		if _, ok := out.foldersByKey[key]; !ok {
+			out.foldersByKey[key] = st.Name
+			out.folders = append(out.folders, name)
 		}
 	}
-	sort.Strings(labels)
-	sort.Strings(folders)
-	return labels, folders, labelSet, nil
+	sort.Strings(out.labels)
+	sort.Strings(out.folders)
+	return out, nil
 }
 
 func (s *SuggestionService) job(jobID string) *suggestJob {
