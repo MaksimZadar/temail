@@ -28,6 +28,8 @@ export class ProviderForm {
   structuredOutput = $state(false);
   tools = $state(false);
   maxContext = $state(0);
+  /** "", "none", "low", "medium" or "high". Kept as loaded so an edit does not clear it. */
+  thinking = $state("");
   /** Write-only. Never filled from the provider, cleared after every submit. */
   apiKey = $state("");
   hasKey = $state(false);
@@ -99,6 +101,7 @@ export class ProviderForm {
     this.structuredOutput = p.capabilities.structuredOutput;
     this.tools = p.capabilities.tools;
     this.maxContext = p.capabilities.maxContext;
+    this.thinking = p.thinking;
     this.apiKey = ""; // never prefilled
     this.hasKey = p.hasKey;
     this.keyRequired = false;
@@ -117,6 +120,7 @@ export class ProviderForm {
     this.structuredOutput = p.capabilities.structuredOutput;
     this.tools = p.capabilities.tools;
     this.maxContext = p.capabilities.maxContext;
+    this.thinking = "";
     // Cloud providers start switched off: nothing is sent until you turn them on.
     this.enabled = p.kind === "local";
     this.models = [];
@@ -148,6 +152,7 @@ export class ProviderForm {
         tools: this.tools,
         maxContext: Math.max(0, Math.trunc(Number(this.maxContext) || 0)),
       },
+      thinking: this.thinking,
       apiKey: this.apiKey,
     };
   }

@@ -303,6 +303,27 @@ func TestSuggestTimeoutAndMissingMessage(t *testing.T) {
 	}
 }
 
+func TestSuggestionThinking(t *testing.T) {
+	tests := []struct {
+		name string
+		p    config.LLMProvider
+		want string
+	}{
+		{"local defaults to none", config.LLMProvider{BaseURL: "http://127.0.0.1:11434/v1", Kind: config.KindLocal}, config.ThinkingNone},
+		{"local derived kind defaults to none", config.LLMProvider{BaseURL: "http://127.0.0.1:11434/v1"}, config.ThinkingNone},
+		{"local configured value wins", config.LLMProvider{BaseURL: "http://127.0.0.1:11434/v1", Kind: config.KindLocal, Thinking: config.ThinkingHigh}, config.ThinkingHigh},
+		{"cloud keeps the provider default", config.LLMProvider{BaseURL: "https://llm.example.test/v1", Kind: config.KindCloud}, ""},
+		{"cloud configured value wins", config.LLMProvider{BaseURL: "https://llm.example.test/v1", Kind: config.KindCloud, Thinking: config.ThinkingLow}, config.ThinkingLow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := suggestionThinking(tt.p); got != tt.want {
+				t.Fatalf("suggestionThinking = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSuggestLocalCallHasNoDeadline(t *testing.T) {
 	fx := newSuggestFixture(t)
 	fx.addMailboxes()

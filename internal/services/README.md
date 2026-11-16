@@ -32,7 +32,7 @@ adding a method. The rules are:
 | `SetupService` | `GetStatus(ctx)`, `SaveAccount(ctx, host, imapPort, smtpPort, tlsMode, username, password)`, `ProbeCert(ctx)`, `TrustCert(ctx, fingerprint, replace)`, `TestConnection(ctx)` |
 | `MailService` | `CacheInfo(ctx)`, `ListMailboxes(ctx)`, `ListMessages(ctx, mailbox, cursor, limit)`, `GetMessage(ctx, mailbox, uidValidity, uid)`, `GetAttachment(ctx, mailbox, uidValidity, uid, partID)` |
 | `SyncService` | `Start()`, `Stop()`, `Status()` |
-| `LLMService` | `ListProviders()`, `SaveProvider(input)`, `DeleteProvider(name)`, `SetDefaultProvider(name)`, `TestProvider(ctx, name)`, `ListModels(ctx, name)` |
+| `LLMService` | `ListProviders()`, `SaveProvider(input)`, `DeleteProvider(name)`, `SetDefaultProvider(name)`, `TestProvider(ctx, name)`, `ListModels(ctx, name)`, `ModelCapabilities(name, model)` |
 | `ActionService` | `Apply(ctx, ActionDTO)`, `Undo(ctx, id)`, `UndoLast(ctx)`, `Recent(ctx, limit)` |
 
 `ctx` is the Wails call context. It is not part of the JavaScript signature.
@@ -178,15 +178,17 @@ running, and its result is cached for 30 s.
 ### LLMService (phase P3)
 
 Manages provider settings and keys. It never sends mail content. Its only network
-calls are `TestProvider` (one tiny structured call) and `ListModels`, both made by
-the user's explicit click.
+calls are `TestProvider` (one tiny structured call), `ListModels` and
+`ModelCapabilities`, all made by the user's explicit click.
 
 - `ListProviders()` returns `LLMProviderDTO`: `name`, `baseURL`, `model`, `kind`,
   `enabled`, `capabilities` (`structuredOutput`, `tools`, `maxContext`),
+  `thinking` (`""` for the provider default, else `none`/`low`/`medium`/`high`),
   `isDefault` and `hasKey`. `hasKey` only says whether a key is available (from
   the keyring or `TEMAIL_LLM_<NAME>_KEY`). The key itself is never returned.
 - `SaveProvider(LLMProviderInput)` validates the name (`[A-Za-z0-9][A-Za-z0-9_-]{0,63}`),
-  the model length and the key length, then `config.Validate` (which also refuses
+  the model length, the key length and the `thinking` value, then
+  `config.Validate` (which also refuses
   two names that read the same environment variable). The steps are:
   1. **Confirmation.** Turning cloud on (a new cloud provider, a disabled one, or
      a local one changed to cloud while enabled) asks the `CloudConfirmer` first.
@@ -227,6 +229,14 @@ the user's explicit click.
   When a stored key is not approved for the base URL, it returns an empty list
   and `ErrKeyNeedsReentry`. Its text starts with `key_needs_reentry:`, so the UI
   can match it the same way.
+- `ModelCapabilities(name, model)` returns `{thinkingSupported, thinkingValues,
+  thinkingDefault}` for a local Ollama provider, read with `POST {baseURL without
+  /v1}/api/show` and no API key (10 s bound). `thinkingValues` are config values;
+  `""` stands for the provider default, so a boolean-only model reports
+  `["none", ""]`. A cloud provider or an endpoint without `/api/show` returns
+  `llm.ErrModelCapabilitiesUnsupported` with `thinkingSupported=false`, so the UI
+  hides the control. The `model` argument overrides the saved one, letting the UI
+  probe a name that is being typed. No key is read.
 - **`clientFor` never mixes a URL with another URL's key.** It reads the provider
   and the key under `cfgMu`, so a writer that is half done cannot be seen. It then
   releases the lock, and only then makes the client. Its key is used only if
@@ -302,7 +312,10 @@ validation live in `internal/suggest`.
   default an enabled local provider is preferred, then the first enabled one. A
   disabled cloud provider is refused with `cloud_disabled:` (`ErrSuggestCloudDisabled`)
   before any content is sent. An identical batch that is already running returns
-  its id instead of starting a second job.
+  its id instead of starting a second job. A local provider runs with thinking
+  `none` unless its config sets a value (label classification does not need
+  reasoning; on qwen3:8b this cut a call from 11.3 s to 0.27 s). A cloud provider
+  keeps its config or the provider default.
 - Each email gets one structured call: the system prompt carries the task, the
   existing label/folder names, and the rule that the email is untrusted data;
   the user message is one delimited `<email-data>` block (headers and plain

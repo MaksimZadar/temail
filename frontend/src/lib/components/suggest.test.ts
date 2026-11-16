@@ -81,6 +81,7 @@ const provider = (o: Partial<api.LLMProvider> = {}): api.LLMProvider => ({
   kind: "local",
   enabled: true,
   capabilities: { structuredOutput: true, tools: false, maxContext: 0 },
+  thinking: "",
   isDefault: true,
   hasKey: false,
   ...o,

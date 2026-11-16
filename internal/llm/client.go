@@ -38,8 +38,9 @@ const approxCharsPerToken = 4
 // Client talks to one provider. It is safe for concurrent use. A Client holds
 // the API key only inside the SDK; it never returns or formats it.
 type Client struct {
-	p   Provider
-	sdk openai.Client
+	p    Provider
+	sdk  openai.Client
+	http *http.Client
 }
 
 // NewClient returns a client for p. apiKey may be empty (Ollama needs none).
@@ -49,14 +50,24 @@ func NewClient(p Provider, apiKey string, opts Options) (*Client, error) {
 	if !validBase(p.BaseURL) {
 		return nil, fmt.Errorf("llm: provider %q: baseURL must be an http(s) URL with a host", p.Name)
 	}
+	if !config.ValidThinking(opts.Thinking) {
+		return nil, fmt.Errorf("llm: provider %q: unknown thinking value", p.Name)
+	}
+	if opts.Thinking != "" {
+		p.Thinking = opts.Thinking
+	}
+	if !config.ValidThinking(p.Thinking) {
+		return nil, fmt.Errorf("llm: provider %q: unknown thinking value", p.Name)
+	}
 	dialTimeout := opts.DialTimeout
 	if dialTimeout <= 0 {
 		dialTimeout = DefaultDialTimeout
 	}
+	httpClient := newHTTPClient(p.Kind, dialTimeout)
 	sdkOpts := []option.RequestOption{
 		option.WithBaseURL(normalizeBase(p.BaseURL)),
 		option.WithAPIKey(apiKey),
-		option.WithHTTPClient(newHTTPClient(p.Kind, dialTimeout)),
+		option.WithHTTPClient(httpClient),
 		// Retries are the caller's decision (one structured-output retry), not
 		// the SDK's: a retried request could be sent to the provider twice.
 		option.WithMaxRetries(0),
@@ -69,7 +80,7 @@ func NewClient(p Provider, apiKey string, opts Options) (*Client, error) {
 		sdkOpts = append(sdkOpts, option.WithRequestTimeout(timeout))
 	}
 	sdk := openai.NewClient(sdkOpts...)
-	return &Client{p: p, sdk: sdk}, nil
+	return &Client{p: p, sdk: sdk, http: httpClient}, nil
 }
 
 // checkEnabled refuses a call to a disabled cloud provider before anything is

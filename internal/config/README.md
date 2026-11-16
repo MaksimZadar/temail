@@ -18,6 +18,11 @@ Windows). Phase 2.
     cloud off, local on. A cloud provider receives no content until it is enabled.
   - `capabilities`: `structuredOutput`, `tools` (both bool, default false) and
     `maxContext` (tokens, 0 means unknown, negative fails validation).
+  - `thinking`: optional reasoning effort, one of `none`, `low`, `medium`,
+    `high`, or omitted for the provider default. It is sent as
+    `reasoning_effort`; `none` turns thinking off on Ollama. Unknown values
+    (including `max`, which the OpenAI SDK would accept) fail validation, so the
+    stored vocabulary stays the one the UI offers.
   - `keyBinding`: the `BaseURLBinding` (SHA-256 of the normalised base URL) that
     the stored API key was approved for. It is not a secret. A key is used only
     while `KeyBoundTo` holds, so a key never follows a changed URL. A malformed
